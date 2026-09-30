@@ -358,6 +358,35 @@ describe("states the backend can be in", () => {
     expect(screen.getByText(/text comparison is not available/i)).toBeTruthy();
   });
 
+  it("does not claim a shared phone number when the stored signal matched but the CVs show none", async () => {
+    setup({
+      comparison: comparison({
+        fields: [
+          ...comparison().fields,
+          {
+            key: "phone",
+            label: "Phone",
+            comparable: true,
+            existing_state: "extracted",
+            incoming_state: "extracted",
+            note: null,
+            items: [
+              { status: "added", label: "+971 50 000 0000", existing: null, incoming: value("+971 50 000 0000") },
+              { status: "only_existing", label: "+44 20 0000 0000", existing: value("+44 20 0000 0000"), incoming: null },
+            ],
+          },
+        ],
+      }),
+    });
+    await loaded();
+    const why = screen.getByRole("region", { name: /Why Cadence thinks/ });
+    expect(within(why).getByText(/Phone signal matched, but the two CVs show no phone number in common/)).toBeTruthy();
+    expect(within(why).queryByText("Same phone number")).toBeNull();
+    // It is not offered as supporting evidence next to the recommendation either.
+    const recommendation = screen.getByRole("region", { name: /Proposed by Cadence/ });
+    expect(within(recommendation).queryByText("Same phone number")).toBeNull();
+  });
+
   it("flags conflicting date evidence", async () => {
     setup({
       comparison: comparison({

@@ -1,5 +1,5 @@
 import type { Comparison, Review } from "@/lib/api";
-import { decisionCopy, recommendation, summarize } from "@/lib/compare";
+import { decisionCopy, recommendation, summarize, type SignalContext } from "@/lib/compare";
 import { Tag } from "@/components/ui/tag";
 import { supportingSignals } from "./why-related";
 
@@ -7,10 +7,20 @@ import { supportingSignals } from "./why-related";
  * What Cadence suggests. It is drawn as a dashed proposal, never as a decision:
  * it has no buttons, and it does not change when the recruiter decides.
  */
-export function Recommendation({ review, comparison, candidateId }: { review: Review; comparison: Comparison | null; candidateId: string | null }) {
+export function Recommendation({
+  review,
+  comparison,
+  candidateId,
+  context,
+}: {
+  review: Review;
+  comparison: Comparison | null;
+  candidateId: string | null;
+  context?: SignalContext;
+}) {
   const rec = recommendation(review);
   const summary = comparison?.available ? summarize(comparison) : null;
-  const support = supportingSignals(review.evidence, candidateId);
+  const support = supportingSignals(review.evidence, candidateId, context);
   return (
     <section aria-labelledby="rec-heading" className="proposal px-3.5 py-3">
       <h2 id="rec-heading" className="flex flex-wrap items-center gap-2 text-xs font-bold uppercase tracking-[0.07em] text-prop-ink">

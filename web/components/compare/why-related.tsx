@@ -1,5 +1,5 @@
 import type { EvidenceItem } from "@/lib/api";
-import { describeSignal } from "@/lib/compare";
+import { describeSignal, type SignalContext } from "@/lib/compare";
 
 const GLYPH = { match: "✓", mismatch: "✗", unknown: "?", info: "≈" } as const;
 const KIND_LABEL = { match: "Supports", mismatch: "Against", unknown: "Not available", info: "Measured" } as const;
@@ -12,12 +12,18 @@ export function WhyRelated({
   signals,
   candidateId,
   confidence,
+  context,
 }: {
   signals: EvidenceItem[];
   candidateId: string | null;
   confidence: number | null;
+  context?: SignalContext;
 }) {
-  const relevant = signals.filter((s) => !s.candidate_id || !candidateId || s.candidate_id === candidateId);
+  // "Not a byte-identical file" carries no weight and says nothing useful, so only an identical file is listed.
+  const relevant = signals.filter(
+    (s) =>
+      (!s.candidate_id || !candidateId || s.candidate_id === candidateId) && !(s.code === "document_hash" && s.state !== "matched"),
+  );
   // Weight zero means the signal is informational and is not part of the score.
   const ordered = [...relevant].sort((a, b) => b.weight - a.weight);
   return (
@@ -30,7 +36,7 @@ export function WhyRelated({
       ) : (
         <ul className="divide-y divide-rule rounded border border-rule bg-panel">
           {ordered.map((signal) => {
-            const described = describeSignal(signal);
+            const described = describeSignal(signal, context);
             return (
               <li key={`${signal.code}-${signal.candidate_id ?? ""}`} className="flex items-start gap-3 px-3 py-2">
                 <span aria-hidden="true" className="w-4 shrink-0 text-center font-bold">
@@ -57,10 +63,10 @@ export function WhyRelated({
 }
 
 /** The few strongest supporting signals, for the short version next to the recommendation. */
-export function supportingSignals(signals: EvidenceItem[], candidateId: string | null): string[] {
+export function supportingSignals(signals: EvidenceItem[], candidateId: string | null, context?: SignalContext): string[] {
   return signals
     .filter((s) => (!s.candidate_id || !candidateId || s.candidate_id === candidateId) && s.weight > 0)
-    .map((s) => describeSignal(s))
+    .map((s) => describeSignal(s, context))
     .filter((d) => d.kind === "match")
     .map((d) => d.text)
     .slice(0, 4);

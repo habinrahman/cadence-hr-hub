@@ -90,6 +90,7 @@ export function CompareView() {
     setBusy(true);
     setActionError(null);
     setNotice(null);
+    let conflict = false;
     const needsTarget = action !== "create_separate_candidate" && loaded.comparison.candidates.length > 1;
     try {
       await decideReview(loaded.review.id, action, needsTarget ? (candidateId ?? undefined) : undefined);
@@ -97,10 +98,13 @@ export function CompareView() {
       setNotice(`Decision recorded: ${decisionCopy(action).label}.`);
       notify("Decision recorded");
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 409) setStale(true);
+      if (reason instanceof ApiError && reason.status === 409) conflict = true;
       else setActionError(reason);
     } finally {
       await refresh(candidateId);
+      // Say "already decided" together with the refreshed record, so the message never sits next to controls
+      // that are about to disappear.
+      if (conflict) setStale(true);
       lock.current = false;
       setBusy(false);
     }
@@ -122,6 +126,9 @@ export function CompareView() {
   const rec = recommendation(review);
   const record = activity.filter((e) => e.action === "duplicate_review_opened" || e.action === "duplicate_review_decided");
   const spreadsheet = comparison.reason === "excel_row";
+  // Only judge the stored phone signal when the two CVs were actually read.
+  const phoneField = comparison.available ? comparison.fields.find((f) => f.key === "phone") : undefined;
+  const signalContext = phoneField ? { sharedPhone: phoneField.items.some((item) => item.status === "same") } : undefined;
 
   return (
     <>
@@ -206,7 +213,7 @@ export function CompareView() {
 
           <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
             <aside aria-label="Recommendation and decision" className="space-y-4 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start">
-              <Recommendation review={review} comparison={comparison} candidateId={candidateId} />
+              <Recommendation review={review} comparison={comparison} candidateId={candidateId} context={signalContext} />
               <DecisionPanel
                 review={review}
                 recommendedAction={rec.action}
@@ -235,7 +242,7 @@ export function CompareView() {
             </aside>
 
             <div className="min-w-0 space-y-8 lg:col-start-1 lg:row-start-1">
-              <WhyRelated signals={review.evidence} candidateId={candidateId} confidence={review.confidence} />
+              <WhyRelated signals={review.evidence} candidateId={candidateId} confidence={review.confidence} context={signalContext} />
               {comparison.available ? (
                 <>
                   <Changes comparison={comparison} onOpenEvidence={setFocus} />

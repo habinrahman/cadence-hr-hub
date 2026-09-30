@@ -55,11 +55,13 @@ function Card({ title, kind, side, candidateName }: { title: string; kind: "exis
 /** The two documents, side by side. The upload date is shown as an upload date and nothing more. */
 export function DocumentCards({ comparison }: { comparison: Comparison }) {
   const existingName = comparison.candidate?.name ?? "";
+  // The name each CV states for itself, read from its own text. Empty when the reader found none.
+  const incomingName = comparison.fields.find((f) => f.key === "name")?.items[0]?.incoming?.label ?? "";
   return (
     <div>
       <div className="grid grid-cols-[minmax(0,1fr)] gap-3 md:grid-cols-2">
         <Card title="Existing CV" kind="existing" side={comparison.existing} candidateName={existingName} />
-        <Card title="Incoming CV" kind="incoming" side={comparison.incoming} candidateName={null} />
+        <Card title="Incoming CV" kind="incoming" side={comparison.incoming} candidateName={incomingName} />
       </div>
       <p className="mt-1.5 text-xs text-mut">
         Upload dates say when a file arrived, not which CV has newer content. Filenames are never used as evidence.

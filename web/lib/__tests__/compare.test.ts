@@ -60,6 +60,18 @@ describe("describeSignal", () => {
     expect(describeSignal(signal({ code: "cv_dates", state: "matched" })).text).toMatch(/later dates/i);
     expect(describeSignal(signal({ code: "explicit_version", state: "unmatched" })).text).toMatch(/not later/i);
   });
+  it("does not repeat a phone match when the two CVs share no phone number", () => {
+    const matched = signal({ code: "phone", state: "matched" });
+    expect(describeSignal(matched).text).toBe("Same phone number");
+    expect(describeSignal(matched, { sharedPhone: true }).text).toBe("Same phone number");
+    const doubtful = describeSignal(matched, { sharedPhone: false });
+    expect(doubtful.kind).toBe("unknown");
+    expect(doubtful.text).toMatch(/date-like digits/i);
+    expect(doubtful.text).not.toMatch(/^Same phone/);
+  });
+  it("only second-guesses the phone signal, never the email signal", () => {
+    expect(describeSignal(signal({ code: "email", state: "matched" }), { sharedPhone: false }).text).toBe("Same email address");
+  });
   it("does not call the wording similarity a meaning model", () => {
     expect(describeSignal(signal({ code: "semantic", state: "recorded", value: 0.4 })).text).toMatch(/word overlap/i);
   });

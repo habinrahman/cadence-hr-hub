@@ -23,9 +23,24 @@ const pct = (value: number | null) => (value === null ? "" : `${Math.round(value
  * cv_dates "matched" means the incoming CV mentions later dates than what is stored,
  * and the similarity signals are token overlap, not a meaning model.
  */
-export function describeSignal(item: EvidenceItem): { text: string; kind: "match" | "mismatch" | "unknown" | "info" } {
+export type SignalContext = {
+  /**
+   * Whether the two CVs really show a phone number in common (date-shaped digit runs excluded).
+   * The stored phone signal can come from date-like digits, so when it says "matched" but the CVs share no
+   * phone number, the page says that instead of claiming the same phone number.
+   */
+  sharedPhone?: boolean;
+};
+
+export function describeSignal(
+  item: EvidenceItem,
+  context: SignalContext = {},
+): { text: string; kind: "match" | "mismatch" | "unknown" | "info" } {
   const value = item.value;
   const unknown = (text: string) => ({ text, kind: "unknown" as const });
+  if (item.code === "phone" && item.state === "matched" && context.sharedPhone === false) {
+    return unknown("Phone signal matched, but the two CVs show no phone number in common. It may come from date-like digits, so do not rely on it");
+  }
   switch (item.code) {
     case "email":
     case "phone": {

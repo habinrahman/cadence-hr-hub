@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.compare import router as compare_router
 from app.api.desk import router as desk_router
 from app.api.excel import router as excel_router
 from app.api.hiring import router as hiring_router
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
     app.include_router(sourcing_router)
     app.include_router(problems_router)
     app.include_router(excel_router)
+    app.include_router(compare_router)
     return app
 
 

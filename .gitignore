@@ -1,0 +1,17 @@
+.DS_Store
+*.pyc
+__pycache__/
+node_modules/
+.next/
+.env
+.env.*
+!.env.example
+backend/var/
+backend/.venv/
+.superpowers/
+
+# Build output and local environment
+tsconfig.tsbuildinfo
+*.egg-info/
+backend/build/
+.env.local

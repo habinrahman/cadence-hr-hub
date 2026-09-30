@@ -1,0 +1,178 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --nav: #0b3954;
+  --nav-ink: #cfe4f0;
+  --canvas: #eef5f8;
+  --panel: #ffffff;
+  --inset: #e2edf2;
+  --rule: #c9dae3;
+  --rule-strong: #6f8ea1;
+
+  /* Text */
+  --ink: #0e2230;
+  --mut: #4a6272;
+
+  /* Provenance. Hues are for borders, fills and stripes; -ink variants are for text and white-on-fill tags. */
+  --human: #0a6cc2;
+  --human-ink: #0a5ea8;
+  --human-bg: #e1f0fc;
+  --prop: #b86e00;
+  --prop-ink: #8a5000;
+  --prop-bg: #fff0d2;
+  --ok: #1b8a5a;
+  --ok-ink: #14704a;
+  --ok-bg: #dcf3e8;
+  --bad: #c8412f;
+  --bad-ink: #a83324;
+  --bad-bg: #fbe6e2;
+  --ev: #4f7591;
+  --ev-ink: #3f627c;
+
+  /* Object hues */
+  --t-rel: #6c5ce7;
+  --t-rel-ink: #5443c9;
+  --t-req: #00a6c8;
+  --t-req-ink: #00738c;
+  --t-match: #2ba57a;
+  --t-match-ink: #17795a;
+  --t-share: #e0567a;
+  --t-share-ink: #b02f5e;
+}
+
+@theme inline {
+  --color-nav: var(--nav);
+  --color-nav-ink: var(--nav-ink);
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-inset: var(--inset);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-ink: var(--ink);
+  --color-mut: var(--mut);
+  --color-human: var(--human);
+  --color-human-ink: var(--human-ink);
+  --color-human-bg: var(--human-bg);
+  --color-prop: var(--prop);
+  --color-prop-ink: var(--prop-ink);
+  --color-prop-bg: var(--prop-bg);
+  --color-ok: var(--ok);
+  --color-ok-ink: var(--ok-ink);
+  --color-ok-bg: var(--ok-bg);
+  --color-bad: var(--bad);
+  --color-bad-ink: var(--bad-ink);
+  --color-bad-bg: var(--bad-bg);
+  --color-ev: var(--ev);
+  --color-ev-ink: var(--ev-ink);
+  --color-t-rel: var(--t-rel);
+  --color-t-rel-ink: var(--t-rel-ink);
+  --color-t-req: var(--t-req);
+  --color-t-req-ink: var(--t-req-ink);
+  --color-t-match: var(--t-match);
+  --color-t-match-ink: var(--t-match-ink);
+  --color-t-share: var(--t-share);
+  --color-t-share-ink: var(--t-share-ink);
+  --font-sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+/* Element defaults live in the base layer so Tailwind utilities (text-white, etc.) can override them. */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1,
+  h2,
+  h3 {
+    margin: 0;
+  }
+
+  a {
+    color: var(--human-ink);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--human);
+    outline-offset: 2px;
+  }
+}
+
+/* Shared visual classes live in the components layer, below utilities. */
+@layer components {
+  /* Unknown / not extracted */
+  .hatch {
+    background: repeating-linear-gradient(135deg, #ffffff, #ffffff 3px, var(--inset) 3px, var(--inset) 6px);
+  }
+
+  /* Proposed by Cadence, not applied */
+  .proposal {
+    border: 1px dashed var(--prop);
+    background: var(--prop-bg);
+    border-radius: 4px;
+  }
+
+  /* Native dialog */
+  dialog {
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--rule-strong);
+    border-radius: 6px;
+    padding: 0;
+    max-width: min(92vw, 30rem);
+  }
+  dialog::backdrop {
+    background: rgba(14, 34, 48, 0.45);
+  }
+  dialog.slide-over {
+    margin: 0 0 0 auto;
+    height: 100dvh;
+    max-height: none;
+    width: min(100vw, 34rem);
+    max-width: none;
+    border-radius: 0;
+    border-width: 0 0 0 1px;
+  }
+
+  @keyframes pulse-soft {
+    50% {
+      opacity: 0.5;
+    }
+  }
+  .skeleton {
+    animation: pulse-soft 1.4s ease-in-out infinite;
+    background: var(--inset);
+    border-radius: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  @media (max-width: 640px) {
+    body {
+      font-size: 15px;
+    }
+  }
+}

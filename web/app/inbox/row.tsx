@@ -82,7 +82,7 @@ export function InboxRow({ group, atLeast = false, showWhy = true }: { group: Qu
       ) : null}
       {meta.why && showWhy ? <p className="mt-1 text-mut">{meta.why}</p> : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <LinkButton variant="primary" href={group.href}>
+        <LinkButton variant="primary" href={documentId ? `/compare?document=${documentId}` : group.href}>
           {ctaFor(group, atLeast)} →
         </LinkButton>
         {canPreview ? (

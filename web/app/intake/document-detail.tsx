@@ -7,7 +7,7 @@ import { ACTION_LABELS, DOCUMENT_STATUS } from "@/lib/labels";
 import { shortDate } from "@/lib/format";
 import { AuditLine } from "@/components/domain/audit-line";
 import { RelationshipReview } from "@/components/domain/relationship-review";
-import { Button } from "@/components/ui/button";
+import { Button, LinkButton } from "@/components/ui/button";
 import { Panel, PanelRow, SectionLabel } from "@/components/ui/panel";
 import { ErrorState } from "@/components/ui/states";
 import { Tag } from "@/components/ui/tag";
@@ -60,6 +60,12 @@ export function DocumentDetail({
       {review ? (
         <section aria-label="Relationship review">
           <SectionLabel>Relationship to existing profiles</SectionLabel>
+          <div className="mb-2 flex flex-wrap items-center gap-3">
+            <LinkButton variant="primary" href={`/compare?document=${document.id}`}>
+              Compare the two CVs →
+            </LinkButton>
+            <span className="text-xs text-mut">Side-by-side evidence, then decide. You can also decide here.</span>
+          </div>
           <Panel>
             <RelationshipReview
               review={review}

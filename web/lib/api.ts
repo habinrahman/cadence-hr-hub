@@ -26,6 +26,7 @@ export type EvidenceItem = {
 
 export type Review = {
   id: string;
+  document_id?: string | null;
   status: string;
   confidence: number | null;
   likely_relationship: string | null;
@@ -525,4 +526,86 @@ export function getDocumentText(id: string) {
 
 export function getExcelImport(id: string) {
   return request<ExcelImportReport>(`/excel/candidates/${id}`);
+}
+
+export type CompareEvidence = { quote: string; page: number | null };
+export type CompareValue = { label: string; evidence: CompareEvidence } | null;
+export type CompareItemStatus = "same" | "added" | "changed" | "only_existing" | "unknown";
+export type CompareItem = {
+  status: CompareItemStatus;
+  label: string;
+  existing: CompareValue;
+  incoming: CompareValue;
+  similarity?: number | null;
+};
+export type CompareFieldState = "extracted" | "not_extracted" | "unavailable";
+export type CompareField = {
+  key: string;
+  label: string;
+  comparable: boolean;
+  existing_state: CompareFieldState;
+  incoming_state: CompareFieldState;
+  note: string | null;
+  items: CompareItem[];
+  stored_name?: string | null;
+};
+export type CompareDocument = {
+  id: string;
+  filename: string;
+  media_type: string;
+  byte_size: number;
+  received_at: string;
+  page_count: number;
+  status: string;
+  is_current: boolean;
+  text_source: string | null;
+  language_code: string | null;
+  error_code: string | null;
+};
+export type CompareSide = { state: string; document: CompareDocument | null };
+export type CompareDateFact = { date: string; page: number } | null;
+export type CompareDates = {
+  existing: { latest_mentioned: CompareDateFact; labelled_version: CompareDateFact } | null;
+  incoming: { latest_mentioned: CompareDateFact; labelled_version: CompareDateFact } | null;
+  uploaded: { existing: string | null; incoming: string | null };
+  newer_by_mentioned: "incoming" | "existing" | "same" | null;
+  newer_by_labelled: "incoming" | "existing" | "same" | null;
+  conflict: boolean;
+};
+export type TextDiffLine = { page: number; text: string };
+export type TextDiff = {
+  available: boolean;
+  note: string;
+  incoming_only: TextDiffLine[];
+  existing_only: TextDiffLine[];
+  incoming_only_count: number;
+  existing_only_count: number;
+  truncated: boolean;
+};
+export type Comparison = {
+  review_id: string;
+  status: string;
+  decided_at: string | null;
+  available: boolean;
+  reason: string | null;
+  warnings: string[];
+  candidates: { id: string; name: string | null; merged_into_id: string | null }[];
+  candidate: { id: string; name: string | null; merged_into_id: string | null } | null;
+  existing: CompareSide | null;
+  incoming: CompareSide | null;
+  identical_bytes: boolean;
+  fields: CompareField[];
+  dates: CompareDates | null;
+  text_diff: TextDiff | null;
+};
+
+export function getReviewComparison(reviewId: string, candidateId?: string) {
+  const query = candidateId ? `?candidate_id=${encodeURIComponent(candidateId)}` : "";
+  return request<Comparison>(`/reviews/${reviewId}/comparison${query}`);
+}
+
+export type DocumentPages = { id: string; page_count: number; pages: { number: number; text: string }[] };
+
+export function getDocumentPages(id: string) {
+  return request<DocumentPages>(`/documents/${id}/pages`);
 }

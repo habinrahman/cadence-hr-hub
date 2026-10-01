@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("mode", choices=["one", "five", "full"])
     parser.add_argument("--web", default="http://localhost:3000")
     parser.add_argument("--mobile", action="store_true", help="390px viewport")
+    parser.add_argument("--screenshot", help="save a full-page screenshot of the finished page to this path")
     args = parser.parse_args()
 
     failed_requests: list[str] = []
@@ -58,7 +59,8 @@ def main() -> int:
         print("failed requests:", len(failed_requests), failed_requests[:3])
         print("console errors:", console_errors[:3])
         print(f"wall time: {time.time() - started:.0f}s")
-        page.screenshot(path="import-check.png", full_page=True)
+        if args.screenshot:
+            page.screenshot(path=args.screenshot, full_page=True)
         browser.close()
     return 0 if "Import complete" in block and not failed_requests else 1
 

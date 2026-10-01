@@ -303,8 +303,12 @@ def _contacts(side: Side, kind: str) -> list[Item]:
         if kind == "phone" and _DATE_SHAPED.fullmatch(row.quote.strip()):
             continue
         page = row.page or _page_of(side, row.quote)
-        # Show the contact as the CV writes it. The normalised value is only the comparison key.
-        items.append(Item(row.value.casefold(), "", row.quote.strip(), row.quote, page))
+        # Show the contact as the CV writes it. The normalised value is only the comparison key. A phone is keyed on its
+        # last 8 digits, so 052 444 9121 and +972 52 444 9121 are the same number, as in domain.identity.phones_match.
+        key = row.value.casefold()
+        if kind == "phone" and len(key) >= 8:
+            key = key[-8:]
+        items.append(Item(key, "", row.quote.strip(), row.quote, page))
     return items
 
 
@@ -334,7 +338,7 @@ def _field(key: str, label: str, existing: Side, incoming: Side, left: list[Item
     comparable = existing_state == "extracted" and incoming_state == "extracted"
     note = None
     if not comparable:
-        for name, state, side in (("existing", existing_state, existing), ("incoming", incoming_state, incoming)):
+        for name, state, side in (("previous", existing_state, existing), ("new", incoming_state, incoming)):
             if state == "unavailable":
                 note = _UNAVAILABLE_NOTE.format(side=name)
                 break
@@ -513,3 +517,49 @@ def _text_diff(existing: Side, incoming: Side) -> dict:
         "existing_only_count": len(existing_only),
         "truncated": len(incoming_only) > _TEXT_DIFF_LIMIT or len(existing_only) > _TEXT_DIFF_LIMIT,
     }
+
+
+# ---------- page preview support ----------
+# Used only by the page-preview route. They reuse the rules above and change nothing in build_comparison.
+
+
+def review_documents(
+    session: Session, review: DuplicateReview, candidate_id: UUID | None
+) -> tuple[CandidateDocument | None, CandidateDocument | None]:
+    """(existing, incoming): the two documents the comparison shows for this review, chosen by the same rules."""
+    if review.document_id is None:
+        return None, None
+    incoming_doc = session.get(CandidateDocument, review.document_id)
+    if incoming_doc is None:
+        return None, None
+    allowed = [UUID(item) for item in review.signals.get("candidate_ids", [])]
+    if candidate_id is not None and allowed and candidate_id not in allowed:
+        raise CompareError("not_found")
+    chosen = candidate_id or review.candidate_id or (allowed[0] if allowed else None)
+    return _existing_document(session, incoming_doc, chosen, []), incoming_doc
+
+
+def _pages_only(session: Session, document: CandidateDocument | None) -> Side:
+    if document is None:
+        return Side(document=None)
+    rows = session.execute(
+        select(DocumentPage.page_number, DocumentPage.original_text, DocumentPage.normalized_text)
+        .where(DocumentPage.document_id == document.id)
+        .order_by(DocumentPage.page_number)
+    ).all()
+    return Side(document=document, pages=[(number, original, normalized) for number, original, normalized in rows])
+
+
+def only_here_lines(
+    session: Session,
+    pair: tuple[CandidateDocument | None, CandidateDocument | None],
+    which: str,
+    page: int,
+) -> list[str]:
+    """Lines on `page` of one CV that the other CV does not contain, by the same rule as the text diff."""
+    existing, incoming = _pages_only(session, pair[0]), _pages_only(session, pair[1])
+    if existing.state != "ok" or incoming.state != "ok":
+        return []
+    left, right = _lines(existing), _lines(incoming)
+    mine, other = (left, right) if which == "existing" else (right, left)
+    return [text for key, (number, text) in mine.items() if key not in other and number == page]

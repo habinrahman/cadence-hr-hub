@@ -13,7 +13,7 @@ const SHOWN = 12;
 function emptyText(item: CompareItem, side: "existing" | "incoming", field: CompareField): string {
   const state = side === "existing" ? field.existing_state : field.incoming_state;
   if (item.status === "unknown") return state === "unavailable" ? "No readable text" : "Nothing extracted";
-  return side === "existing" ? "Not found in existing CV" : "Not found in incoming CV";
+  return side === "existing" ? "Not found in previous CV" : "Not found in new CV";
 }
 
 function Cell({
@@ -44,7 +44,7 @@ function Cell({
           className="mb-1 text-xs font-semibold text-human-ink underline"
           onClick={() => onOpen({ side, page: evidence.page, quote: evidence.quote })}
         >
-          Show in the {side} CV text
+          Show in the {side === "existing" ? "previous" : "new"} CV
         </button>
       </details>
     </div>
@@ -56,7 +56,7 @@ function Row({ item, field, onOpen }: { item: CompareItem; field: CompareField; 
   return (
     <li className="border-t border-rule px-3.5 py-2.5 first:border-t-0 md:grid md:grid-cols-[minmax(0,1fr)_10.5rem_minmax(0,1fr)] md:items-start md:gap-3">
       <div className="min-w-0">
-        <p className="text-[11px] font-bold uppercase tracking-wider text-mut md:hidden">Existing CV</p>
+        <p className="font-mono text-[10.5px] font-medium uppercase tracking-[0.12em] text-mut md:hidden">Previous CV</p>
         <Cell value={item.existing} side="existing" item={item} field={field} onOpen={onOpen} />
       </div>
       <div className="my-1.5 md:my-0 md:text-center">
@@ -67,7 +67,7 @@ function Row({ item, field, onOpen }: { item: CompareItem; field: CompareField; 
         {typeof item.similarity === "number" ? <p className="mt-0.5 text-xs text-mut">Word overlap {Math.round(item.similarity * 100)}%</p> : null}
       </div>
       <div className="min-w-0">
-        <p className="text-[11px] font-bold uppercase tracking-wider text-mut md:hidden">Incoming CV</p>
+        <p className="font-mono text-[10.5px] font-medium uppercase tracking-[0.12em] text-mut md:hidden">New CV</p>
         <Cell value={item.incoming} side="incoming" item={item} field={field} onOpen={onOpen} />
       </div>
     </li>
@@ -79,8 +79,8 @@ function FieldBlock({ field, onOpen }: { field: CompareField; onOpen: (target: E
   const shown = all ? field.items : field.items.slice(0, SHOWN);
   const differences = field.comparable ? field.items.filter((i) => i.status !== "same").length : 0;
   return (
-    <section aria-labelledby={`field-${field.key}`} className="rounded border border-rule bg-panel">
-      <header className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule bg-inset px-3.5 py-1.5">
+    <section aria-labelledby={`field-${field.key}`} className="border border-rule bg-panel">
+      <header className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule bg-inset px-4 py-2">
         <h3 id={`field-${field.key}`} className="text-[13px] font-bold">
           {field.label}
         </h3>
@@ -127,13 +127,13 @@ function FieldBlock({ field, onOpen }: { field: CompareField; onOpen: (target: E
 export function Changes({ comparison, onOpenEvidence }: { comparison: Comparison; onOpenEvidence: (target: EvidenceTarget) => void }) {
   return (
     <section aria-labelledby="changes-heading">
-      <h2 id="changes-heading" className="mb-2 text-xs font-bold uppercase tracking-[0.07em] text-human-ink">
+      <h2 id="changes-heading" className="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-mut">
         What changed
       </h2>
-      <div className="mb-1.5 hidden md:grid md:grid-cols-[minmax(0,1fr)_10.5rem_minmax(0,1fr)] md:gap-3 px-3.5 text-[11px] font-bold uppercase tracking-wider text-mut" aria-hidden="true">
-        <span>Existing CV</span>
+      <div className="mb-1.5 hidden md:grid md:grid-cols-[minmax(0,1fr)_10.5rem_minmax(0,1fr)] md:gap-3 px-3.5 font-mono text-[10.5px] font-medium uppercase tracking-[0.12em] text-mut" aria-hidden="true">
+        <span>Previous CV</span>
         <span className="text-center">Result</span>
-        <span>Incoming CV</span>
+        <span>New CV</span>
       </div>
       <div className="space-y-3">
         {comparison.fields.map((field) => (

@@ -65,6 +65,7 @@ EXPORT_HEADERS = (
     "candidates_found",
     "candidates_shared",
     "candidate_ids",
+    "shared_candidate_ids",
 )
 
 
@@ -147,6 +148,11 @@ def export_hiring_activity(session: Session, *, actor: Actor, start: date, end: 
     sheet.append(list(EXPORT_HEADERS))
     for request in requests:
         sheet.append(_export_row(session, request))
+        # openpyxl stores any text starting with "=" as a live formula. A company name typed as
+        # =HYPERLINK(...) must reach HR's spreadsheet as text, never as something Excel runs.
+        for cell in sheet[sheet.max_row]:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.data_type = "s"
     write_audit(
         session,
         actor=actor,
@@ -394,25 +400,33 @@ def _weights() -> Weights:
 
 def _export_row(session: Session, request: HiringRequest) -> list[object]:
     owner = session.get(User, request.owner_user_id) if request.owner_user_id else None
-    labels = session.scalars(
-        select(RequestRequirement.label).where(
-            RequestRequirement.request_id == request.id,
-            RequestRequirement.review_status == "approved",
+    requirements = session.execute(
+        select(RequestRequirement.label, RequestRequirement.requirement_text, RequestRequirement.strength)
+        .where(RequestRequirement.request_id == request.id, RequestRequirement.review_status == "approved")
+        .order_by(RequestRequirement.position)
+    ).all()
+    # What was asked for, as a manager reads it: "Python (mandatory), 2+ years experience (mandatory)".
+    described = [
+        f"{f'{text}+ years experience' if label == 'experience' else text} ({strength})" for label, text, strength in requirements
+    ]
+    # "Found for the role" is the pool HR sees (the matcher did not rule them out), the same definition as the request page.
+    match_ids = session.scalars(
+        select(CandidateMatch.candidate_id).where(
+            CandidateMatch.request_id == request.id, CandidateMatch.disposition.in_(("recommended", "needs_review"))
         )
     ).all()
-    match_ids = session.scalars(
-        select(CandidateMatch.candidate_id).where(CandidateMatch.request_id == request.id)
-    ).all()
-    shared_ids = session.scalars(
-        select(SharingRecord.candidate_id).where(SharingRecord.request_id == request.id)
-    ).all()
-    found = session.scalar(
-        select(func.count()).select_from(CandidateMatch).where(CandidateMatch.request_id == request.id)
+    # "Shared" is each candidate actually sent for this request, once: the same definition as the request page.
+    shared_ids = sorted(
+        {
+            str(item)
+            for item in session.scalars(
+                select(SharingRecord.candidate_id).where(SharingRecord.request_id == request.id, SharingRecord.status == "sent")
+            )
+        }
     )
-    shared = session.scalar(
-        select(func.count()).select_from(SharingRecord).where(SharingRecord.request_id == request.id)
-    )
-    candidate_ids = sorted({str(item) for item in (*match_ids, *shared_ids)})
+    found = len(match_ids)
+    shared = len(shared_ids)
+    candidate_ids = sorted({str(item) for item in match_ids} | set(shared_ids))
     return [
         str(request.id),
         _public_text(request.company_name),
@@ -420,10 +434,11 @@ def _export_row(session: Session, request: HiringRequest) -> list[object]:
         request.status,
         request.received_at.date().isoformat(),
         _public_text(owner.full_name) if owner else "",
-        _public_text(", ".join(label for label in labels if _public_text(label))),
+        _public_text("; ".join(item for item in described if _public_text(item))),
         int(found or 0),
         int(shared or 0),
         ",".join(candidate_ids),
+        ",".join(shared_ids),
     ]
 
 

@@ -24,6 +24,7 @@ ALLOWED_DETAIL_KEYS = frozenset(
         "count",
         "processing_version",
         "document_id",
+        "canonical_document_id",
         "candidate_id",
         "job_id",
         "review_id",

@@ -8,7 +8,7 @@ import time
 
 from app.db import make_engine, make_session_factory
 from app.jobs.queue import run_once
-from app.services.pipeline import run_extract
+from app.services.processing import run_process
 from app.services.retention import apply_retention
 
 
@@ -24,7 +24,7 @@ def main() -> None:
     while True:
         session = factory()
         try:
-            worked = run_once(session, worker_id=worker_id, handler=run_extract)
+            worked = run_once(session, worker_id=worker_id, handler=run_process)
         finally:
             session.close()
         if not worked:

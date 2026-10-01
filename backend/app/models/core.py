@@ -356,7 +356,8 @@ class CandidateSource(IdMixin, TimestampMixin, Base):
 
     __tablename__ = "candidate_sources"
 
-    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("candidate_documents.id"), unique=True, nullable=False)
+    # None for a lead recorded before any CV exists; a CV sent later goes through intake like any other.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("candidate_documents.id"), unique=True, nullable=True)
     candidate_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("candidates.id"))
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)

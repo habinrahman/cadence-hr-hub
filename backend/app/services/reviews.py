@@ -29,7 +29,7 @@ from app.models import (
     User,
 )
 from app.services.audit import write_audit
-from app.services.pipeline import _attach
+from app.services.pipeline import _attach, profile_document
 
 
 def decide_duplicate_review(
@@ -56,32 +56,64 @@ def decide_duplicate_review(
         target = session.get(Candidate, _target_candidate(review, candidate_id))
         if target is None:
             raise TransitionError("invalid_transition")
+        if target.merged_into_id is not None:
+            # That profile was merged into another since the review opened. Attaching a CV to it would hide the CV
+            # on a profile nobody sees; the recruiter re-checks against the surviving profile instead.
+            raise TransitionError("candidate_merged")
     transition(review, status, machine="duplicate_review", actor=actor)
     review.decided_by = actor.user_id
     review.decided_at = datetime.now(timezone.utc)
+    canonical_id: UUID | None = None
     if action == ACCEPT_UPDATE:
         _link(session, document, target, make_current=True)
     elif action == RECORD_DUPLICATE:
-        _link(session, document, target, make_current=False)
+        canonical_id = _archive_duplicate(session, document, target, actor)
     else:
         _link(session, document, Candidate(source="upload"), make_current=True)
-    if document.status == "needs_review":
+    if action != RECORD_DUPLICATE and document.status == "needs_review":
         transition(document, "extracted", machine="candidate_document", actor=actor)
+    if action != RECORD_DUPLICATE:
+        # The decision attaches the CV; only now does what it says become part of the profile.
+        profile_document(session, document, session.get(Candidate, document.candidate_id), actor)
+    detail = {
+        "human_action": action,
+        "recommended_action": review.recommended_action,
+        "relationship": review.likely_relationship,
+        "confidence": _whole_percent(review.confidence),
+        "document_id": str(document.id),
+        "candidate_id": str(target.id) if action == RECORD_DUPLICATE else (str(document.candidate_id) if document.candidate_id else None),
+    }
+    if action == RECORD_DUPLICATE:
+        detail["outcome"] = "archived"
+        detail["canonical_document_id"] = str(canonical_id) if canonical_id else None
     write_audit(
         session,
         actor=actor,
         action="duplicate_review_decided",
         entity_type="duplicate_review",
         entity_id=review.id,
-        detail={
-            "human_action": action,
-            "recommended_action": review.recommended_action,
-            "relationship": review.likely_relationship,
-            "confidence": _whole_percent(review.confidence),
-            "document_id": str(document.id),
-            "candidate_id": str(document.candidate_id) if document.candidate_id else None,
-        },
+        detail=detail,
     )
+
+
+def _archive_duplicate(session: Session, document: CandidateDocument, target: Candidate, actor: Actor) -> UUID | None:
+    """Delete Duplicate. Only the duplicate upload is archived, under the retention model: rows and file are kept.
+
+    The document is not attached to the candidate, gets no application and never becomes current, so the candidate
+    and the canonical CV are untouched. Returns the canonical (current) document id for the audit trail.
+    """
+    if document.is_current or document.candidate_id is not None:
+        raise TransitionError("invalid_transition")  # never archive a document a candidate already relies on
+    canonical = session.scalar(
+        select(CandidateDocument.id).where(
+            CandidateDocument.candidate_id == target.id,
+            CandidateDocument.is_current.is_(True),
+        )
+    )
+    if canonical == document.id:
+        raise TransitionError("invalid_transition")
+    transition(document, "archived", machine="candidate_document", actor=actor)
+    return canonical
 
 
 def open_excel_relationship_review(session: Session, row: ExcelImportRow, assessment, actor: Actor) -> DuplicateReview:

@@ -1,18 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { approveShare, getSharePreview, sendShare, type SharePreview, type ShareRecord } from "@/lib/api";
+import { approveShare, getSharePreview, sendShare, setRequestContact, type SharePreview, type ShareRecord } from "@/lib/api";
 import { shortDateTime } from "@/lib/format";
 import { labelAudit } from "@/lib/labels";
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog, SlideOver } from "@/components/ui/dialog";
+import { inputClass } from "@/components/ui/field";
+import { SlideOver } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState, Notice } from "@/components/ui/states";
 import { Tag } from "@/components/ui/tag";
 import { useToast } from "@/components/ui/toast";
 
 /**
- * Sharing is two separate human steps: approve, then send. Nothing leaves Cadence until Send is confirmed.
+ * One human decision on one screen: review what leaves Cadence, then "Approve & send". The button is the confirmation, and
+ * the sentence beside it says what it does, so there is no second dialog. The server still records the approval and the
+ * send separately (and refuses a send without an approval), so nothing leaves Cadence unless a recruiter clicked it.
+ * If the approval was recorded but the mail did not go out, the same button offers "Send email" again.
  */
 export function SharePanel({
   requestId,
@@ -33,7 +37,7 @@ export function SharePanel({
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<"approve" | "send" | null>(null);
+  const [contact, setContact] = useState("");
 
   useEffect(() => {
     if (!candidateId) return;
@@ -59,32 +63,35 @@ export function SharePanel({
     };
   }, [requestId, candidateId]);
 
-  async function approve() {
+  async function approveAndSend() {
     if (!candidateId) return;
-    setConfirm(null);
     setBusy(true);
     setError(null);
+    let recorded = preview?.approved === true;
     try {
-      await approveShare(requestId, candidateId);
-      setPreview((current) => (current ? { ...current, approved: true } : current));
-      notify("Share approved. Sending is a separate step.");
-      onChanged();
+      if (!recorded) {
+        await approveShare(requestId, candidateId);
+        recorded = true;
+        setPreview((current) => (current ? { ...current, approved: true } : current));
+      }
+      setResult(await sendShare(requestId, candidateId));
+      notify("Share approved and sent");
     } catch (reason) {
       setError(reason);
     } finally {
       setBusy(false);
+      // Tell the page only what the server now holds: an approval that was recorded, even if the mail failed.
+      if (recorded) onChanged();
     }
   }
 
-  async function send() {
-    if (!candidateId) return;
-    setConfirm(null);
+  async function saveContact() {
     setBusy(true);
     setError(null);
     try {
-      setResult(await sendShare(requestId, candidateId));
-      notify("Share sent");
-      onChanged();
+      const saved = await setRequestContact(requestId, contact.trim());
+      setPreview((current) => (current ? { ...current, recipient: saved.contact_email } : current));
+      notify("Company contact saved");
     } catch (reason) {
       setError(reason);
     } finally {
@@ -107,48 +114,75 @@ export function SharePanel({
               <dt className="text-mut">Company</dt>
               <dd className="break-words font-semibold">{preview.company}</dd>
               <dt className="text-mut">Recipient</dt>
-              <dd className="break-all font-mono text-[13px]">{preview.recipient}</dd>
+              <dd className="break-all font-mono text-[13px]">
+                {preview.recipient ?? <span className="font-sans font-semibold text-bad-ink">Not set yet</span>}
+              </dd>
               <dt className="text-mut">Candidate</dt>
               <dd className="break-words font-semibold">{preview.candidate}</dd>
               <dt className="text-mut">Role</dt>
               <dd className="break-words">{preview.role}</dd>
-              <dt className="text-mut">Latest title</dt>
-              <dd>{preview.selected.title ?? "Not recorded"}</dd>
               <dt className="text-mut">Experience</dt>
               <dd>{preview.selected.years_of_experience === null ? "Not recorded" : `${preview.selected.years_of_experience} years`}</dd>
-              <dt className="text-mut">Skills</dt>
-              <dd className="break-words">{preview.selected.skills.length ? preview.selected.skills.join(", ") : "None recorded"}</dd>
+              <dt className="text-mut">Requirements met</dt>
+              <dd className="break-words">
+                {preview.selected.requirements_met.length ? preview.selected.requirements_met.join(", ") : "None recorded"}
+              </dd>
             </dl>
             <p className="mt-3 rounded border border-rule bg-inset px-3 py-2 text-[13px]">
-              <strong>Not included:</strong> email address, phone number and the CV file.
+              <strong>Not included:</strong> email address, phone number, the CV file, and anything else on the CV (such
+              as hobbies or other skills).
             </p>
           </section>
 
           <section aria-label="Approval">
             <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-human-ink">Decision</h3>
-            <ol className="space-y-3">
-              <li className="flex flex-wrap items-center gap-3">
-                <span className="w-24 font-semibold">1. Approve</span>
-                {preview.approved ? (
-                  <Tag tone="decided">Approved</Tag>
-                ) : (
-                  <Button variant="primary" busy={busy} onClick={() => setConfirm("approve")}>
-                    Approve share…
+            {sent ? (
+              <p>
+                <Tag tone="ok">Sent</Tag>
+              </p>
+            ) : !preview.recipient ? (
+              <form
+                className="space-y-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveContact();
+                }}
+              >
+                <label htmlFor="share-contact" className="block text-[13.5px]">
+                  Who at <strong className="break-words">{preview.company}</strong> receives this shortlist? Nothing can be sent
+                  until you name the company contact.
+                </label>
+                <input
+                  id="share-contact"
+                  type="email"
+                  className={inputClass}
+                  value={contact}
+                  placeholder="hiring@company.com"
+                  onChange={(e) => setContact(e.target.value)}
+                />
+                <Button type="submit" busy={busy} disabled={!contact.trim()}>
+                  Save company contact
+                </Button>
+              </form>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-[13.5px]">
+                  {preview.approved ? (
+                    <>Your approval is already recorded. </>
+                  ) : (
+                    <>Approving records your decision. </>
+                  )}
+                  An email about <strong className="break-words">{name}</strong> goes to{" "}
+                  <strong className="break-words">{preview.recipient}</strong> now. This cannot be undone.
+                </p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button variant="primary" size="lg" busy={busy} onClick={approveAndSend}>
+                    {preview.approved ? "Send email" : "Approve & send"}
                   </Button>
-                )}
-              </li>
-              <li className="flex flex-wrap items-center gap-3">
-                <span className="w-24 font-semibold">2. Send</span>
-                {sent ? (
-                  <Tag tone="ok">Sent</Tag>
-                ) : (
-                  <Button variant="primary" busy={busy} disabled={!preview.approved} onClick={() => setConfirm("send")}>
-                    Send email…
-                  </Button>
-                )}
-                {!preview.approved && !sent ? <span className="text-xs text-mut">Approve first.</span> : null}
-              </li>
-            </ol>
+                  {preview.approved ? <Tag tone="decided">Approved, not sent yet</Tag> : null}
+                </div>
+              </div>
+            )}
           </section>
 
           {sent && result ? (
@@ -173,34 +207,6 @@ export function SharePanel({
         </div>
       ) : null}
 
-      <ConfirmDialog
-        open={confirm === "approve"}
-        title="Approve this share?"
-        body={
-          <p>
-            Approve sharing <strong>{name}</strong> with <strong>{preview?.company}</strong> ({preview?.recipient}). Approving does not send
-            anything.
-          </p>
-        }
-        confirmLabel="Approve share"
-        busy={busy}
-        onConfirm={approve}
-        onCancel={() => setConfirm(null)}
-      />
-      <ConfirmDialog
-        open={confirm === "send"}
-        title="Send this share now?"
-        body={
-          <p>
-            An email about <strong>{name}</strong> goes to <strong className="break-all">{preview?.recipient}</strong>. This cannot be undone.
-          </p>
-        }
-        confirmLabel="Send email"
-        tone="danger"
-        busy={busy}
-        onConfirm={send}
-        onCancel={() => setConfirm(null)}
-      />
     </SlideOver>
   );
 }

@@ -22,10 +22,16 @@ export const SIGNAL_STATE_LABELS: Record<string, string> = {
 };
 
 export const ACTION_LABELS: Record<string, string> = {
-  accept_update: "Update the existing profile",
-  record_duplicate: "Record as duplicate",
-  create_separate_candidate: "Save as a different candidate",
+  accept_update: "Merge & Update Profile",
+  record_duplicate: "Delete Duplicate",
+  create_separate_candidate: "Create New Candidate",
 };
+
+/** An Excel row has no CV to delete: its "duplicate" outcome only records another application. */
+export function actionLabel(action: string, hasDocument = true): string {
+  if (action === "record_duplicate" && !hasDocument) return "Record as duplicate";
+  return ACTION_LABELS[action] ?? action;
+}
 
 export const RELATIONSHIP_LABELS: Record<string, string> = {
   updated_cv: "Updated CV",
@@ -69,13 +75,13 @@ export const QUEUE_TYPE: Record<string, { label: string; hue: Hue; why: string; 
   requirement_approval: {
     label: "Requirements",
     hue: "req",
-    why: "Proposed from the job description. They do not drive matching until you approve them.",
+    why: "Proposed from the job description. The pool is provisional, and nothing can be shortlisted or shared, until you approve them.",
     cta: "Review requirements",
   },
   match_review: {
     label: "Match review",
     hue: "match",
-    why: "Candidates compared with approved requirements. Matching never shortlists.",
+    why: "Candidates matched on the requirements you approved. Matching never shortlists; you choose.",
     cta: "Review matches",
   },
   share_approval: {
@@ -117,10 +123,12 @@ export const SEARCH_REASON: Record<string, string> = {
 };
 
 export const AUDIT_ACTION: Record<string, string> = {
+  demo_reset: "Candidate repository reset",
   document_received: "File received",
   document_extracted: "Extraction finished",
   same_document: "Identical file recognised",
   duplicate_review_opened: "Recommendation prepared",
+  duplicate_review_rescored: "Recommendation re-scored with the current rules",
   duplicate_review_decided: "Recruiter decided",
   accepted_update: "Accepted update",
   recorded_duplicate: "Marked duplicate",
@@ -128,6 +136,8 @@ export const AUDIT_ACTION: Record<string, string> = {
   field_lock_kept: "Locked field kept",
   candidate_viewed: "Profile opened",
   pii_text_access: "CV text opened",
+  review_comparison_viewed: "CV comparison opened",
+  cv_preview_viewed: "CV page preview opened",
   shortlist_decision: "Shortlisted",
   share_approved: "Share approved",
   candidate_shared: "Candidate shared",
@@ -138,12 +148,39 @@ export const AUDIT_ACTION: Record<string, string> = {
   sourced_duplicate_detected: "Duplicate detected",
   sourced_review_decided: "Recruiter decision",
   sourced_candidate_created: "Candidate created",
+  candidate_recommended: "Candidate proposed for a request",
+  job_enqueued: "Background job queued",
+  job_succeeded: "Background job finished",
+  job_quarantined: "Background job set aside",
+  document_needs_ocr: "File needs OCR",
+  requirements_extracted: "Requirements proposed",
+  requirements_changed: "Requirements changed",
+  pool_opened: "Candidate pool opened",
+  candidate_rejected: "Candidate rejected",
+  candidate_restored: "Rejection undone, back in the pool",
+  request_contact_changed: "Company contact set",
+  sourced_candidate_attached: "Source added to an existing profile",
+  profiles_merged: "Profiles merged",
+  excel_import_completed: "Excel import finished",
+  hiring_activity_exported: "Hiring activity exported",
+  problem_report_created: "Problem reported",
+  problem_report_updated: "Problem report updated",
+  problem_report_status_changed: "Problem report status changed",
+  problem_report_resolved: "Problem report resolved",
 };
 
 export const REPORT_STATUS: Record<string, { label: string; tone: Tone }> = {
   open: { label: "Open", tone: "warn" },
   in_progress: { label: "In progress", tone: "decided" },
   resolved: { label: "Resolved", tone: "ok" },
+};
+
+export const PROCESSING_STAGE: Record<string, string> = {
+  received: "Received",
+  extracting: "Extracting requirements",
+  matching: "Matching candidates",
+  complete: "Matching complete",
+  failed: "Processing failed",
 };
 
 export const REQUEST_STATUS: Record<string, string> = {
@@ -153,9 +190,6 @@ export const REQUEST_STATUS: Record<string, string> = {
   matching: "Matching",
   closed: "Closed",
   cancelled: "Cancelled",
-  needs_info: "Needs info",
-  pending_approval: "Pending approval",
-  shared: "Shared",
 };
 
 export const SOURCE_TYPE: Record<string, string> = { linkedin: "LinkedIn", referral: "Referral", other: "Other" };

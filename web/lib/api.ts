@@ -1,4 +1,4 @@
-import { ApiError } from "./errors";
+import { apiError, ConnectionError, FileReadError } from "./errors";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -68,6 +68,8 @@ export type CandidateProfile = {
     is_current: boolean;
     received_at: string;
     supersedes_document_id: string | null;
+    /** The newest relationship review for this file, if there is one. */
+    review_id?: string | null;
   }[];
   evidence: { field: string; value: string; quote: string; page: number | null; quote_verified: boolean }[];
   activity: { action: string; actor_kind: string; created_at: string }[];
@@ -91,7 +93,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, typeof body.detail === "string" ? body.detail : `Request failed (${response.status})`);
+    throw apiError(response.status, body.detail);
   }
   return response.json() as Promise<T>;
 }
@@ -122,6 +124,12 @@ export type DeskItem = {
   status: string;
   created_at: string;
   href: string;
+  /** Requirement approvals and confirmed pools: how many requirements or candidates the item stands for. */
+  count?: number;
+  /** Relationship reviews: what Cadence recommends, if it is confident enough to, and the signal strength out of 100. */
+  relationship?: string | null;
+  recommended_action?: string | null;
+  confidence?: number | null;
 };
 
 export type Dashboard = {
@@ -133,6 +141,10 @@ export type Dashboard = {
     shares_awaiting_approval: number;
     open_problem_reports: number;
     active_hiring_requests: number;
+    requests_received: number;
+    new_matches: number;
+    duplicate_reviews: number;
+    reviews_needing_attention: number;
   };
   relationship_reviews: DeskItem[];
   requirements_awaiting_approval: DeskItem[];
@@ -140,10 +152,36 @@ export type Dashboard = {
   shortlisted_candidates: DeskItem[];
   shares_awaiting_approval: DeskItem[];
   open_problem_reports: DeskItem[];
-  recent_activity: { action: string; actor_kind: string; created_at: string }[];
+  recent_activity: (AuditEventView & { actor_kind: string })[];
   active_hiring_requests: DeskItem[];
+  needs_you_now: DeskItem[];
+  new_match_pools: DeskItem[];
   viewer_id: string;
 };
+
+/** One audit row as a person reads it: who, what, when, and the request, candidate or file it concerns. */
+export type AuditEventView = {
+  id: string;
+  created_at: string;
+  action: string;
+  actor: { kind: string; name: string | null };
+  request: { id: string; label: string } | null;
+  candidate: { id: string; label: string } | null;
+  document: { id: string; label: string } | null;
+  detail: Record<string, unknown>;
+};
+
+export type AuditPage = { events: AuditEventView[]; next_before: string | null };
+
+export function getAudit(params: { category?: string; before?: string | null; requestId?: string; candidateId?: string } = {}) {
+  const query = new URLSearchParams();
+  if (params.category) query.set("category", params.category);
+  if (params.before) query.set("before", params.before);
+  if (params.requestId) query.set("request_id", params.requestId);
+  if (params.candidateId) query.set("candidate_id", params.candidateId);
+  const suffix = query.toString();
+  return request<AuditPage>(`/audit${suffix ? `?${suffix}` : ""}`);
+}
 
 export function getDashboard() {
   return request<Dashboard>("/dashboard");
@@ -161,12 +199,68 @@ export function getActivity(id: string) {
   return request<{ events: ActivityEvent[] }>(`/documents/${id}/activity`);
 }
 
-export function uploadDocument(file: File) {
+/** Resolves when the API answers its public health check. The browser is the one asking, so this tests the same route uploads use. */
+export async function checkApiReachable(): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/health`, { cache: "no-store" });
+  } catch {
+    throw new ConnectionError(API_URL, "the request was blocked or got no response");
+  }
+  if (!response.ok) throw new ConnectionError(API_URL, `health check returned ${response.status}`);
+}
+
+export async function uploadDocument(file: File) {
+  // Read the bytes first: an unreadable file is reported as that, not as a network failure, and a file
+  // that changes on disk mid-upload (cloud sync, editors) cannot abort the request.
+  let bytes: ArrayBuffer;
+  try {
+    bytes = await file.arrayBuffer();
+  } catch {
+    throw new FileReadError(file.name);
+  }
   const body = new FormData();
-  body.append("file", file);
-  return request<{ id: string; status: string; created: boolean }>("/documents", {
+  body.append("file", new File([bytes], file.name, { type: file.type }));
+  try {
+    return await request<{ id: string; status: string; created: boolean }>("/documents", {
+      method: "POST",
+      body,
+    });
+  } catch (error) {
+    // fetch rejects with a TypeError only when no HTTP response arrived. An answer, even an error, is an ApiError.
+    if (error instanceof TypeError) throw new ConnectionError(API_URL, "no response to the upload");
+    throw error;
+  }
+}
+
+export type DemoStatus = {
+  documents: number;
+  documents_by_status: Record<string, number>;
+  identity_outcomes: Record<string, number>;
+  candidates: number;
+  pending_reviews: number;
+  needs_ocr: number;
+  quarantined: number;
+  failed: number;
+  processing: number;
+  open_jobs: number;
+  hiring_requests: number;
+  matches: number;
+  shortlisted: number;
+  shares: number;
+  last_reset_at: string | null;
+  quarantine_records: number;
+};
+
+export function getDemoStatus() {
+  return request<DemoStatus>("/demo/status");
+}
+
+export function resetDemoData() {
+  return request<{ reset_at: string }>("/demo/reset", {
     method: "POST",
-    body,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "RESET" }),
   });
 }
 
@@ -178,13 +272,17 @@ export type SourcedCandidate = {
   source_type: string;
   source_reference: string;
   notes: string | null;
-  document_id: string;
+  /** None for a lead recorded before any CV exists. */
+  document_id: string | null;
   document_status: string | null;
   identity_outcome: string | null;
   candidate_id: string | null;
   review_id: string | null;
   events: { action: string; actor_kind: string; created_at: string }[];
 };
+
+/** A profile a sourced lead may already be, with the reasons the check found. */
+export type LeadMatch = { candidate_id: string; display_name: string | null; reasons: string[] };
 
 export function submitSourcedCandidate(form: FormData) {
   return request<SourcedCandidate>("/sourced-candidates", { method: "POST", body: form });
@@ -212,20 +310,68 @@ export type MatchRequirement = {
   evidence_id: string | null;
   evidence: string | null;
   retrieval: string | null;
+  /** For an experience requirement: how the years were added up. The quote shows one dated role. */
+  calculation?: string | null;
+  /** Null unless the candidate passed the mandatory gate: the points only add up to a ranking score then. */
+  points_possible?: number | null;
+  points_earned?: number | null;
 };
+
+/** The mandatory gate. Decided from the requirement verdicts before any score. */
+export type Eligibility = "eligible" | "needs_review" | "excluded";
+
+export type BlockingRequirement = { requirement_id: string; name: string; result: string };
 
 export type CandidateMatch = {
   id: string;
   candidate_id: string;
   candidate_name: string | null;
   disposition: string;
+  /** What a recruiter already decided for this candidate on this request. Server truth; not inferred by the page. */
+  shortlisted?: boolean;
+  share_approved?: boolean;
+  shared?: boolean;
   request_id?: string;
   requirement_met_ratio?: number | null;
+  eligibility: Eligibility;
+  /**
+   * 0-100, whole number, for ranking candidates who meet every mandatory requirement. Null for anyone held at the
+   * mandatory gate: that is "no score", not a low one. match_score_exact is the unrounded sum of the points.
+   * This is not the CV relationship (same-person) score.
+   */
+  match_score: number | null;
+  match_score_exact: number | null;
+  score_max?: number;
+  mandatory_met: number;
+  mandatory_total: number;
+  preferred_met: number;
+  preferred_total: number;
+  /** Mandatory requirements holding the candidate: unmet ones when excluded, partial or unknown ones when in review. */
+  blocking_requirements: BlockingRequirement[];
+  score_reason: string;
   processing_version?: number | null;
   explanation: string | null;
   strengths: string[];
   gaps: string[];
   requirements: MatchRequirement[];
+  years_of_experience?: number | null;
+  location?: string | null;
+};
+
+/** awaiting_approval: no requirement was proposed, so there is nothing to match on until HR adds one. */
+export type ProcessingStage = "received" | "extracting" | "awaiting_approval" | "matching" | "complete" | "failed";
+
+/**
+ * provisional: matched on requirements HR has not approved (or a rematch is pending). Viewable, not shortlistable or shareable.
+ * confirmed: matched on HR-approved requirements only.
+ */
+export type PoolStatus = "none" | "provisional" | "confirmed";
+
+export type Processing = {
+  stage: ProcessingStage;
+  matched_count: number;
+  requested_count: number | null;
+  pool_status?: PoolStatus;
 };
 
 export type RequestNote = {
@@ -238,7 +384,16 @@ export type RequestNote = {
 
 export type RequestAttachment = { id: string; filename: string; media_type: string; byte_size: number };
 
-export type RequestSummary = { id: string; company: string; job_title: string; status: string; received_at: string };
+export type RequestSummary = {
+  id: string;
+  company: string;
+  job_title: string;
+  status: string;
+  received_at: string;
+  processing: ProcessingStage;
+  matched_count: number;
+  requested_count: number | null;
+};
 
 export type HiringRequestDetail = {
   id: string;
@@ -255,6 +410,23 @@ export type HiringRequestDetail = {
   requirements: HiringRequirement[];
   candidates_found: number;
   candidates_shared: number;
+  processing: Processing;
+  pool_stale: boolean;
+  /** Which reader proposed the current requirements. `fallback` means the model was not used. */
+  requirements_source?: {
+    model: string | null;
+    prompt_version: string | null;
+    fallback: boolean;
+    /** Why the model did not answer: description_too_long, model_unreachable or model_reply_malformed. */
+    fallback_reason?: string | null;
+    /** Proposals that passed every check. */
+    accepted?: number | null;
+    /** Rejected proposals by reason code. Codes only, never the proposed text. */
+    rejected?: Record<string, number>;
+  } | null;
+  pool_opened_at: string | null;
+  last_match_completed_at: string | null;
+  requested_count: number | null;
 };
 
 export function createHiringRequest(input: {
@@ -262,6 +434,8 @@ export function createHiringRequest(input: {
   job_title: string;
   description: string;
   received_at: string;
+  requested_count?: number;
+  contact_email?: string;
 }) {
   return request<{ id: string; status: string }>("/hiring-requests", {
     method: "POST",
@@ -272,12 +446,6 @@ export function createHiringRequest(input: {
 
 export function getHiringRequest(id: string) {
   return request<HiringRequestDetail>(`/hiring-requests/${id}`);
-}
-
-export function extractHiringRequirements(id: string) {
-  return request<{ requirements: HiringRequirement[] }>(`/hiring-requests/${id}/requirements`, {
-    method: "POST",
-  });
 }
 
 export function editHiringRequirement(
@@ -297,6 +465,22 @@ export function editHiringRequirement(
   });
 }
 
+export function addHiringRequirement(
+  id: string,
+  body: { label: "skill" | "experience" | "education" | "certification" | "other"; text: string; strength: "mandatory" | "preferred"; quote: string },
+) {
+  return request<HiringRequirement>(`/hiring-requests/${id}/requirements/manual`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** HR rejects one requirement. It is kept and labelled, never matched on, and a rematch runs if there is a pool. */
+export function rejectHiringRequirement(requestId: string, requirementId: string) {
+  return request<HiringRequirement>(`/hiring-requests/${requestId}/requirements/${requirementId}/reject`, { method: "POST" });
+}
+
 export function approveHiringRequirements(id: string, requirementIds?: string[]) {
   return request<{ requirements: HiringRequirement[] }>(`/hiring-requests/${id}/requirements/approve`, {
     method: "POST",
@@ -305,8 +489,12 @@ export function approveHiringRequirements(id: string, requirementIds?: string[])
   });
 }
 
-export function openHiringRequest(id: string) {
-  return request<{ id: string; status: string }>(`/hiring-requests/${id}/open`, { method: "POST" });
+export function openPool(id: string) {
+  return request<{ pool_opened_at: string | null }>(`/hiring-requests/${id}/pool/open`, { method: "POST" });
+}
+
+export function retryProcessing(id: string) {
+  return request<{ job_id: string; status: string }>(`/hiring-requests/${id}/process/retry`, { method: "POST" });
 }
 
 export function runHiringMatch(id: string) {
@@ -327,6 +515,13 @@ export function rejectMatch(requestId: string, matchId: string) {
   });
 }
 
+/** Undo a rejection: the candidate goes back to what the requirement verdicts say. Nothing is shortlisted. */
+export function restoreMatch(requestId: string, matchId: string) {
+  return request<{ disposition: string }>(`/hiring-requests/${requestId}/matches/${matchId}/restore`, {
+    method: "POST",
+  });
+}
+
 export type ShareRecord = {
   id: string;
   status: string;
@@ -340,16 +535,26 @@ export type ShareRecord = {
   audit: { id: string; action: string; created_at: string } | null;
 };
 
+/** The company contact a request's shortlist goes to. */
+export function setRequestContact(requestId: string, contactEmail: string) {
+  return request<{ id: string; contact_email: string }>(`/hiring-requests/${requestId}/contact`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contact_email: contactEmail }),
+  });
+}
+
 export type SharePreview = {
   company: string;
-  recipient: string;
+  /** Null until a recruiter names the company contact; nothing is sent before that. */
+  recipient: string | null;
   candidate: string;
   candidate_id: string;
   role: string;
   selected: {
     years_of_experience: number | null;
-    skills: string[];
-    title: string | null;
+    /** The requirements of this request the candidate met. Not the raw skills list, which carries hobbies. */
+    requirements_met: string[];
   };
   approved: boolean;
   sharing: ShareRecord | null;
@@ -394,6 +599,23 @@ export type SearchHit = {
 export function searchCandidates(params: Record<string, string>) {
   const query = new URLSearchParams(params);
   return request<{ results: SearchHit[] }>(`/search?${query.toString()}`);
+}
+
+export type CandidateRow = {
+  candidate_id: string;
+  candidate_name: string | null;
+  years_of_experience: number | null;
+  latest_title: string | null;
+  skills: string[];
+  source: string;
+  updated_at: string;
+};
+
+/** Read-only listing of confirmed profiles. Unlike opening a profile, it writes no audit event. */
+export function listCandidates(limit: number, offset: number) {
+  return request<{ total: number; limit: number; offset: number; candidates: CandidateRow[] }>(
+    `/candidates?limit=${limit}&offset=${offset}`,
+  );
 }
 
 export type MergeProfile = {
@@ -482,7 +704,7 @@ export async function downloadHiringExport(start: string, end: string) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, typeof body.detail === "string" ? body.detail : `Request failed (${response.status})`);
+    throw apiError(response.status, body.detail);
   }
   return response.blob();
 }
@@ -605,6 +827,22 @@ export function getReviewComparison(reviewId: string, candidateId?: string) {
 }
 
 export type DocumentPages = { id: string; page_count: number; pages: { number: number; text: string }[] };
+
+/** One rendered page of a CV in a review, as an image. The session token goes in the header, so it cannot be a plain <img src>. */
+export async function fetchPagePreview(path: string): Promise<{ blob: Blob; pages: number; highlights: number }> {
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${API_URL}${path}`, { headers });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw apiError(response.status, body.detail);
+  }
+  return {
+    blob: await response.blob(),
+    pages: Number(response.headers.get("X-Preview-Pages") ?? 1),
+    highlights: Number(response.headers.get("X-Preview-Highlights") ?? 0),
+  };
+}
 
 export function getDocumentPages(id: string) {
   return request<DocumentPages>(`/documents/${id}/pages`);

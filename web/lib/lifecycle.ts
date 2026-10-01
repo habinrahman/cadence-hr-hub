@@ -1,60 +1,97 @@
+import type { PoolStatus, ProcessingStage } from "@/lib/api";
+
 export type StepState = "done" | "current" | "locked";
 export type Step = {
-  key: "request" | "requirements" | "matches" | "share";
+  key: "received" | "extracted" | "matched" | "review" | "shortlist" | "approved" | "shared";
   label: string;
   state: StepState;
   detail: string;
 };
 export type LifecycleInput = {
-  requirements: { review_status: string }[];
+  /** Automatic processing. This is the source of truth for the first three steps. */
+  processing: ProcessingStage;
+  /** provisional until HR approves the requirements and the rematch confirms the pool. */
+  poolStatus?: PoolStatus;
   matchCount: number;
+  /** Matches HR shortlisted or rejected. */
+  reviewed: number;
+  /** null when the shortlist could not be read. */
   shortlisted: number | null;
   sharesApproved: number;
   shared: number;
 };
 
 /**
- * The request's stored status only reaches draft and open, so the lifecycle is derived
- * from requirement review status, matches, shortlist and share records.
+ * Requirements are extracted automatically and stay proposed, and candidates are matched on them at once. That pool is
+ * provisional. HR approves the requirements, matching re-runs on the approved ones, and the pool is confirmed; only then
+ * can it be shortlisted. An edit sends a requirement back to proposed and the pool back to provisional.
  */
 export function deriveLifecycle(input: LifecycleInput): Step[] {
-  const approved = input.requirements.filter((r) => r.review_status === "approved").length;
-  const pending = input.requirements.length - approved;
-  const requirementsDone = approved > 0 && pending === 0;
+  const extracted = ["awaiting_approval", "matching", "complete"].includes(input.processing);
+  const awaiting = input.processing === "awaiting_approval";
+  const matched = input.processing === "complete";
+  const confirmed = input.poolStatus === "confirmed";
   const shortlisted = input.shortlisted ?? 0;
-  const reviewDone = shortlisted > 0 || input.shared > 0;
-  const shareDone = input.shared > 0;
+  const reviewDone = input.reviewed > 0 || shortlisted > 0 || input.shared > 0;
+  const shortlistDone = shortlisted > 0 || input.shared > 0;
+  const approvedDone = input.sharesApproved > 0 || input.shared > 0;
+  const sharedDone = input.shared > 0;
+  const failed = input.processing === "failed";
 
   const raw: { key: Step["key"]; label: string; done: boolean; detail: string }[] = [
-    { key: "request", label: "Request", done: true, detail: "Saved" },
+    { key: "received", label: "Received", done: true, detail: "Logged by Cadence HR" },
     {
-      key: "requirements",
-      label: "Requirements",
-      done: requirementsDone,
-      detail: input.requirements.length === 0 ? "None proposed yet" : `${approved} approved · ${pending} proposed`,
+      key: "extracted",
+      label: "Requirements extracted",
+      done: extracted,
+      detail: failed ? "Processing failed" : awaiting ? "None proposed, add one" : extracted ? (confirmed ? "Approved by HR" : "Proposed, not approved") : "In progress",
     },
     {
-      key: "matches",
-      label: "Review matches",
+      key: "matched",
+      label: "Matching complete",
+      done: matched,
+      detail: matched
+        ? `${input.matchCount} matched · ${confirmed ? "confirmed" : "provisional"}`
+        : failed
+          ? "Processing failed"
+          : awaiting
+            ? "Needs a requirement"
+            : "In progress",
+    },
+    {
+      key: "review",
+      label: "HR review",
       done: reviewDone,
-      detail:
-        input.shortlisted === null && input.matchCount > 0
-          ? `${input.matchCount} found · shortlist state unknown`
-          : input.matchCount === 0
-            ? "Matching not run"
-            : `${input.matchCount} found · ${shortlisted} shortlisted`,
+      detail: reviewDone
+        ? `${input.reviewed} decided`
+        : matched && !confirmed
+          ? "Approve requirements first"
+          : matched
+            ? "Nothing decided yet"
+            : "After matching",
     },
     {
-      key: "share",
-      label: "Share",
-      done: shareDone,
-      detail: shareDone
-        ? `${input.shared} shared`
-        : input.sharesApproved > 0
-          ? `${input.sharesApproved} approved, not sent`
-          : "Approve, then send",
+      key: "shortlist",
+      label: "Shortlisted",
+      done: shortlistDone,
+      detail:
+        input.shortlisted === null && matched
+          ? "State unknown"
+          : shortlistDone
+            ? `${shortlisted} shortlisted`
+            : matched && !confirmed
+              ? "Needs a confirmed pool"
+              : "None yet",
     },
+    {
+      key: "approved",
+      label: "Share approved",
+      done: approvedDone,
+      detail: approvedDone ? (sharedDone ? "Approved" : `${input.sharesApproved} approved, not sent`) : "Needs a shortlist",
+    },
+    { key: "shared", label: "Shared", done: sharedDone, detail: sharedDone ? `${input.shared} shared` : "Not sent" },
   ];
+
   let currentAssigned = false;
   return raw.map((step) => {
     if (step.done) return { key: step.key, label: step.label, state: "done", detail: step.detail };

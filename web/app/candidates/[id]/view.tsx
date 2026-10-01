@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getCandidate, getDocumentText } from "@/lib/api";
 import { useAsync } from "@/lib/use-async";
 import { CandidateHeader } from "@/components/domain/candidate-header";
@@ -8,14 +8,7 @@ import { ConfirmDialog, SlideOver } from "@/components/ui/dialog";
 import { PanelSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/states";
 import { Facts } from "./facts";
-import { Record } from "./record";
-
-const SECTIONS = [
-  { href: "#profile", label: "Profile" },
-  { href: "#evidence", label: "Evidence" },
-  { href: "#cvs", label: "CVs" },
-  { href: "#record", label: "Record" },
-];
+import { History, Rail } from "./record";
 
 export function CandidateView({ id }: { id: string }) {
   const { data: profile, error, loading, reload } = useAsync(() => getCandidate(id), [id]);
@@ -24,8 +17,15 @@ export function CandidateView({ id }: { id: string }) {
   const [text, setText] = useState<string | null>(null);
   const [textError, setTextError] = useState<unknown>(null);
   const [textLoading, setTextLoading] = useState(false);
+  const [reviewDocument, setReviewDocument] = useState<string | null>(null);
 
   const current = profile?.documents.find((d) => d.is_current);
+
+  // "Compare CVs" appears only when one of this candidate's files has a relationship review to open.
+  // The profile says which file has one, so nothing is probed.
+  useEffect(() => {
+    setReviewDocument(profile?.documents.find((doc) => doc.review_id)?.id ?? null);
+  }, [profile]);
 
   async function openText() {
     if (!current) return;
@@ -54,37 +54,27 @@ export function CandidateView({ id }: { id: string }) {
 
   return (
     <>
-      <CandidateHeader profile={profile} onShowText={current ? () => setConfirming(true) : undefined} />
+      <CandidateHeader profile={profile} compareHref={reviewDocument ? `/compare?document=${reviewDocument}` : null} />
 
-      <nav
-        aria-label="Sections"
-        className="sticky top-0 z-20 -mx-4 mt-4 flex gap-2 overflow-x-auto border-b border-rule bg-canvas px-4 py-2 lg:hidden"
-      >
-        {SECTIONS.map((s) => (
-          <a
-            key={s.href}
-            href={s.href}
-            className="inline-flex min-h-11 items-center rounded-[3px] border border-rule-strong bg-panel px-3 text-[13px] font-semibold no-underline"
-          >
-            {s.label}
-          </a>
-        ))}
-      </nav>
-
-      <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <Facts profile={profile} />
-        <Record profile={profile} />
+      <div className="mt-8 grid grid-cols-[minmax(0,1fr)] gap-x-10 gap-y-10 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="min-w-0 space-y-10">
+          <Facts profile={profile} />
+          <History profile={profile} />
+        </div>
+        <aside aria-label="Skills, documents and provenance" className="min-w-0 lg:border-l lg:border-rule lg:pl-8">
+          <Rail profile={profile} onShowText={current ? () => setConfirming(true) : undefined} />
+        </aside>
       </div>
 
-      <p className="mt-8 text-xs text-mut">This profile is built from CVs and cannot be edited here.</p>
+      <p className="mt-10 text-[12.5px] text-mut">This record is built from CVs and cannot be edited here.</p>
 
       <ConfirmDialog
         open={confirming}
         title="Open the CV text?"
         body={
           <p>
-            You are about to read the full text of <span className="break-all font-mono">{current?.original_filename}</span>. This
-            view is recorded in the audit trail.
+            You are about to read the full text of <span className="break-all font-mono">{current?.original_filename}</span>. This view is
+            recorded in the audit trail.
           </p>
         }
         confirmLabel="Open CV text"

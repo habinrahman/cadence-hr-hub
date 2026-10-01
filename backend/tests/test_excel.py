@@ -425,3 +425,43 @@ def test_excel_different_candidate_keeps_the_original_profile(session):
     assert created_profile is not None
     assert created_profile.source == "excel"
     assert session.scalar(select(Application).where(Application.candidate_id == created_profile.id)).source == "excel"
+
+
+def test_the_export_counts_each_shared_candidate_once_and_never_writes_a_formula(session):
+    """Found in the end-to-end pass: the export said 4 shared where the request page said 1 (it counted every
+    sharing record), listed requirements as "skill, skill", and wrote a company name starting with "=" as a formula."""
+    from datetime import date, datetime, timezone
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.models import SharingRecord
+    from app.services.excel_ops import export_hiring_activity
+    from tests.test_sharing import _candidate, _recruiter, _request, _shortlist
+
+    actor = _recruiter(session)
+    candidate = _candidate(session)
+    request = _request(session)
+    request.company_name = '=HYPERLINK("http://evil.example","open")'
+    entry = _shortlist(session, request, candidate)
+    for status in ("sent", "sent_duplicate", "failed"):
+        session.add(
+            SharingRecord(
+                shortlist_id=entry.shortlist_id,
+                request_id=request.id,
+                candidate_id=candidate.id,
+                actor_user_id=actor.user_id,
+                status=status,
+                sent_at=datetime.now(timezone.utc),
+                destination="smtp",
+            )
+        )
+    session.flush()
+    today = date.today()
+    sheet = load_workbook(BytesIO(export_hiring_activity(session, actor=actor, start=today, end=today))).active
+    header = [cell.value for cell in sheet[1]]
+    row = dict(zip(header, [cell for cell in sheet[2]]))
+    assert row["candidates_shared"].value == 1
+    assert row["shared_candidate_ids"].value == str(candidate.id)
+    assert row["requirements"].value == "Python (mandatory)"
+    assert row["company"].data_type == "s"

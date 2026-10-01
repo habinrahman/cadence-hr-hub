@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.compare import router as compare_router
+from app.api.demo import router as demo_router
 from app.api.desk import router as desk_router
 from app.api.excel import router as excel_router
 from app.api.hiring import router as hiring_router
@@ -40,7 +42,15 @@ def create_app() -> FastAPI:
             return await call_next(request)
         if not request.headers.get("authorization"):
             return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        return await call_next(request)
+        try:
+            return await call_next(request)
+        except Exception:
+            # An unhandled error would otherwise be answered by Starlette's outermost handler, which sits outside the
+            # CORS middleware: the response carries no CORS headers, the browser discards it, and the screen can only
+            # say "Network error" (the demo page said so for every one of 488 uploads). Answering here, inside CORS,
+            # lets the browser read a real 500 and tell HR what happened.
+            logging.getLogger("app").exception("unhandled error on %s %s", request.method, path)
+            return JSONResponse(status_code=500, content={"detail": "server_error"})
 
     origins = [item.strip() for item in get_settings().cors_origins.split(",") if item.strip()]
     app.add_middleware(
@@ -56,6 +66,8 @@ def create_app() -> FastAPI:
     app.include_router(problems_router)
     app.include_router(excel_router)
     app.include_router(compare_router)
+    if get_settings().environment == "local":
+        app.include_router(demo_router)
     return app
 
 

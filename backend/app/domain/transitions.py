@@ -7,14 +7,13 @@ from datetime import datetime, timezone
 from app.domain.actor import Actor
 
 MACHINES: dict[str, dict[str, frozenset[str]]] = {
+    # A request is submitted, opened by the worker, and moves between open and matching on each run. Whether its pool
+    # may be shortlisted or shared is derived from the requirements (hiring.pool_status), not stored here.
     "hiring_request": {
         "draft": frozenset({"submitted", "cancelled"}),
-        "submitted": frozenset({"needs_info", "open", "cancelled"}),
-        "needs_info": frozenset({"open", "cancelled"}),
+        "submitted": frozenset({"open", "cancelled"}),
         "open": frozenset({"matching", "closed", "cancelled"}),
-        "matching": frozenset({"pending_approval", "open", "closed"}),
-        "pending_approval": frozenset({"shared", "matching", "closed"}),
-        "shared": frozenset({"closed"}),
+        "matching": frozenset({"open", "closed"}),
         "closed": frozenset(),
         "cancelled": frozenset(),
     },
@@ -43,13 +42,6 @@ MACHINES: dict[str, dict[str, frozenset[str]]] = {
         "recorded_duplicate": frozenset(),
         "created_separate": frozenset(),
     },
-    "shortlist": {
-        "draft": frozenset({"pending_approval", "withdrawn"}),
-        "pending_approval": frozenset({"approved", "draft", "withdrawn"}),
-        "approved": frozenset({"shared", "withdrawn"}),
-        "shared": frozenset(),
-        "withdrawn": frozenset(),
-    },
     "problem_report": {
         "open": frozenset({"in_progress", "resolved"}),
         "in_progress": frozenset({"resolved", "open"}),
@@ -63,9 +55,6 @@ USER_ONLY = frozenset(
         ("duplicate_review", "accepted_update"),
         ("duplicate_review", "recorded_duplicate"),
         ("duplicate_review", "created_separate"),
-        ("shortlist", "approved"),
-        ("shortlist", "shared"),
-        ("hiring_request", "shared"),
     }
 )
 
@@ -74,7 +63,6 @@ INITIAL = {
     "candidate_document": "received",
     "job": "queued",
     "duplicate_review": "pending",
-    "shortlist": "draft",
     "problem_report": "open",
 }
 

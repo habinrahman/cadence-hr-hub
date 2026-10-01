@@ -25,7 +25,7 @@ _SNIPPET = 160
 @dataclass
 class SearchHit:
     candidate_id: UUID | None
-    document_id: UUID
+    document_id: UUID | None  # None for a profile with no CV yet (a spreadsheet row, a sourced lead)
     chunk_id: UUID | None
     confirmed_profile: bool
     retrieval_score: float
@@ -98,6 +98,49 @@ def hybrid_search(
     return _merge(hits)[:limit]
 
 
+def list_candidates(session: Session, *, limit: int = 25, offset: int = 0) -> tuple[int, list[dict]]:
+    """Confirmed, unmerged profiles, newest update first. Read-only: it is a listing, not a profile view."""
+    confirmed = _confirmed_ids(session)
+    if not confirmed:
+        return 0, []
+    total = session.scalar(select(func.count()).select_from(Candidate).where(Candidate.id.in_(confirmed))) or 0
+    rows = session.scalars(
+        select(Candidate)
+        .where(Candidate.id.in_(confirmed))
+        .order_by(Candidate.updated_at.desc(), Candidate.id)
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    ids = [row.id for row in rows]
+    skills: dict[UUID, list[str]] = {item: [] for item in ids}
+    for candidate_id, skill in session.execute(
+        select(CandidateSkill.candidate_id, CandidateSkill.name)
+        .where(CandidateSkill.candidate_id.in_(ids))
+        .order_by(CandidateSkill.created_at, CandidateSkill.name)
+    ):
+        if skill not in skills[candidate_id] and len(skills[candidate_id]) < 6:
+            skills[candidate_id].append(skill)
+    titles: dict[UUID, str] = {}
+    for candidate_id, title in session.execute(
+        select(CandidateExperience.candidate_id, CandidateExperience.title)
+        .where(CandidateExperience.candidate_id.in_(ids), CandidateExperience.title.is_not(None))
+        .order_by(CandidateExperience.start_date.desc().nulls_last(), CandidateExperience.created_at)
+    ):
+        titles.setdefault(candidate_id, title)
+    return total, [
+        {
+            "candidate_id": str(row.id),
+            "candidate_name": row.display_name,
+            "years_of_experience": float(row.years_of_experience) if row.years_of_experience is not None else None,
+            "latest_title": titles.get(row.id),
+            "skills": skills[row.id],
+            "source": row.source,
+            "updated_at": row.updated_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
 def semantic_search(
     session: Session,
     query: str,
@@ -115,6 +158,11 @@ def semantic_search(
 
 
 def _confirmed_ids(session: Session) -> set[UUID]:
+    """Profiles a recruiter can find: not merged away, and either holding a read CV or holding no CV at all.
+
+    A profile with no CV comes from a spreadsheet row or a sourced lead that HR created. It was invisible to search
+    and to the candidate list before, so an imported person could not be found. A profile whose only CV is still
+    waiting for review or was set aside stays hidden until a person decides."""
     rows = session.scalars(
         select(CandidateDocument.candidate_id)
         .join(Candidate, Candidate.id == CandidateDocument.candidate_id)
@@ -123,7 +171,14 @@ def _confirmed_ids(session: Session) -> set[UUID]:
             CandidateDocument.status.in_(_CONFIRMED),
         )
     )
-    return {item for item in rows if item is not None}
+    without_cv = session.scalars(
+        select(Candidate.id).where(
+            Candidate.merged_into_id.is_(None),
+            Candidate.source != "upload",  # created by a person (spreadsheet, LinkedIn, referral), not by intake
+            ~select(CandidateDocument.id).where(CandidateDocument.candidate_id == Candidate.id).exists(),
+        )
+    )
+    return {item for item in rows if item is not None} | set(without_cv)
 
 
 def _apply_filters(
@@ -280,20 +335,23 @@ def _filter_hits(
     nationality,
 ) -> list[SearchHit]:
     hits: list[SearchHit] = []
+    reason = _filter_reason(name, skill, education, experience, certificate, min_years, job_title, industry, nationality)
     documents = session.scalars(
         select(CandidateDocument).where(
             CandidateDocument.candidate_id.in_(allowed),
             CandidateDocument.status.in_(_CONFIRMED),
         )
     )
-    seen: set[UUID] = set()
+    # One document per candidate, in the order found; the current CV when there is one, so the evidence comes from
+    # the CV a recruiter would open.
+    chosen: dict[UUID, CandidateDocument] = {}
     for document in documents:
-        if document.candidate_id in seen or document.candidate_id is None:
+        if document.candidate_id is None:
             continue
-        seen.add(document.candidate_id)
-        reason = _filter_reason(
-            name, skill, education, experience, certificate, min_years, job_title, industry, nationality
-        )
+        if document.candidate_id not in chosen or (document.is_current and not chosen[document.candidate_id].is_current):
+            chosen[document.candidate_id] = document
+    seen = set(chosen)
+    for document in chosen.values():
         hits.append(
             SearchHit(
                 candidate_id=document.candidate_id,
@@ -305,6 +363,19 @@ def _filter_hits(
                 evidence=_filter_evidence(
                     session, document, reason, job_title, industry, nationality
                 ),
+            )
+        )
+    for candidate_id in sorted(allowed - seen, key=str):
+        # A profile with no CV: only a name filter can find it, and the name is the evidence.
+        hits.append(
+            SearchHit(
+                candidate_id=candidate_id,
+                document_id=None,
+                chunk_id=None,
+                confirmed_profile=True,
+                retrieval_score=1.0,
+                reasons=[reason],
+                evidence="Profile without a CV yet",
             )
         )
     return hits

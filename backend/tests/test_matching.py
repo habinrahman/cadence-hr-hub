@@ -84,7 +84,7 @@ SAM = """Sam Unknown
 sam@example.com
 +14155550191
 Public notes about compilers and careful engineering practice across many years of work.
-The notes stay on compilers, toolchains, and review habits. They do not name a programming language.
+The notes cover toolchains and review habits, with examples written in Python. No dated roles are listed.
 """
 
 PENDING = """Ada Lovelace
@@ -110,8 +110,11 @@ Other: ledger
 
 
 def test_only_explicit_requirements_become_mandatory():
-    bare = parse_job_requirements("Python\nSQL\nFive years of practice")
-    assert bare == []
+    # Prose with no list and no wording is never turned into a requirement.
+    assert parse_job_requirements("We are a friendly team in a great office. Python and SQL come up sometimes.") == []
+    # A pasted list is proposed (HR approves it); a years phrase without a number is not invented as a requirement.
+    bare = {(r.text, r.strength) for r in parse_job_requirements("Python\nSQL\nFive years of practice")}
+    assert bare == {("Python", "mandatory"), ("SQL", "mandatory")}
     rows = parse_job_requirements(JOB)
     by_text = {row.text.casefold(): row for row in rows}
     assert "teleportation" not in by_text
@@ -168,7 +171,7 @@ def test_match_verdicts_evidence_and_hr_review(session):
     assert all(row.source_quote and row.source_quote in JOB for row in stored)
     approve_requirements(session, request.id, actor)
     open_request(session, request.id, actor)
-    matches = run_match(session, request.id, actor, embedder=LocalFeatureEmbedder())
+    matches = run_match(session, request.id, actor)
     by_candidate = {match.candidate_id: match for match in matches}
     assert invoice.candidate_id not in by_candidate
     assert pending.candidate_id not in by_candidate
@@ -180,7 +183,8 @@ def test_match_verdicts_evidence_and_hr_review(session):
     sam_match = by_candidate[sam.candidate_id]
     assert ada_match.disposition == "recommended"
     assert grace_match.disposition == "excluded"
-    assert pat_match.disposition == "needs_review"
+    # Pat names Python in his experience, not under Skills. The CV says it, so it is met, quoting that line.
+    assert pat_match.disposition == "recommended"
     assert sam_match.disposition == "needs_review"
     assert float(ada_match.rank_score) <= 1
     assert "100" not in (ada_match.explanation or "")
@@ -201,23 +205,24 @@ def test_match_verdicts_evidence_and_hr_review(session):
     ledger = _result(session, ada_match.id, "ledger")
     assert ledger.evidence_quote
     assert "ledger" in ledger.evidence_quote.casefold()
-    assert "keyword" in (ledger.retrieval or "")
-    assert "semantic" in (ledger.retrieval or "")
+    assert ledger.retrieval == "keyword"
     assert any("ledger" in content.casefold() for content in source_pages)
 
     assert _verdicts(session, grace_match.id)["python"] == "unmet"
-    assert _verdicts(session, pat_match.id)["python"] == "partial"
+    assert _verdicts(session, pat_match.id)["python"] == "meets"
     pat_python = _result(session, pat_match.id, "python")
-    assert pat_python.evidence_quote
-    assert "python" in pat_python.evidence_quote.casefold()
+    assert pat_python.evidence_quote == "Used Python daily on the ledger"
+    assert pat_python.retrieval == "keyword"
     pat_chunk = session.scalar(select(DocumentChunk.content).where(DocumentChunk.document_id == pat.id))
     assert pat_python.evidence_quote.casefold() in " ".join(pat_chunk.split()).casefold()
-    assert _verdicts(session, sam_match.id)["python"] == "unknown"
+    # Sam's CV names Python but lists no dated roles: the years cannot be read, so a person checks them.
+    assert _verdicts(session, sam_match.id)["python"] == "meets"
+    assert _verdicts(session, sam_match.id)["1"] == "unknown"
 
     grace_chunk = session.scalar(select(DocumentChunk).where(DocumentChunk.document_id == grace.id))
     grace_chunk.embedding = LocalFeatureEmbedder().embed(["Python ledger"])[0]
     session.flush()
-    run_match(session, request.id, actor, embedder=LocalFeatureEmbedder())
+    run_match(session, request.id, actor)
     session.refresh(grace_match)
     assert grace_match.disposition == "excluded"
     assert _verdicts(session, grace_match.id)["python"] == "unmet"
@@ -250,6 +255,11 @@ def test_match_verdicts_evidence_and_hr_review(session):
         assert exc.code == "human_required"
     rejected = reject_match(session, request.id, pat_match.id, actor)
     assert rejected.disposition == "rejected"
+    # A rematch refreshes verdicts but never reopens a candidate a recruiter rejected.
+    run_match(session, request.id, actor)
+    session.refresh(pat_match)
+    assert pat_match.disposition == "rejected"
+    assert _verdicts(session, pat_match.id)["python"] == "meets"
     view = request_view(session, request.id)
     assert view["candidates_found"] == 2
     assert view["candidates_shared"] == 0
@@ -307,3 +317,140 @@ def _result(session, match_id, text: str) -> MatchRequirementResult:
             RequestRequirement.requirement_text.ilike(text),
         )
     ).scalar_one()
+
+
+def _ingest_four(session):
+    return [
+        _run(session, name, make_pdf(text), extractor=DeterministicExtractor(), embedder=LocalFeatureEmbedder())
+        for name, text in (("ada.pdf", ADA), ("grace.pdf", GRACE), ("pat.pdf", PAT), ("sam.pdf", SAM))
+    ]
+
+
+def test_every_candidate_who_names_the_requirement_meets_it_however_many_there_are(session):
+    """Regression: verdicts came from a corpus-wide search capped at 20 chunks. The 21st candidate who named
+    "Consulting" got "unmet", which excludes them on a mandatory requirement. Each CV is now read on its own."""
+    total = 26
+    for index in range(total):
+        cv = (
+            f"Person{chr(65 + index)} Example{chr(65 + index)}\nperson{index}@example.com\n"
+            "Experience\nStrategy consulting project for a retail client\n"
+        )
+        _run(session, f"c{index}.pdf", make_pdf(cv), extractor=DeterministicExtractor(), embedder=LocalFeatureEmbedder())
+    nobody = (
+        "Nobody Here\nnone@example.com\nExperience\nRetail cashier at a grocery store, handled the till\n"
+        "Opened and closed the shop, trained new staff on stock rotation and kept the weekly rota\n"
+    )
+    absent = _run(session, "none.pdf", make_pdf(nobody), extractor=DeterministicExtractor(), embedder=LocalFeatureEmbedder())
+    actor = _actor(session)
+    request = create_request(
+        session,
+        company_name="Northwind",
+        job_title="Analyst",
+        description="Other: consulting",
+        received_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        actor=actor,
+    )
+    extract_requirements(session, request.id, actor)
+    from app.models import RequestRequirement as Req
+
+    session.execute(Req.__table__.update().where(Req.request_id == request.id).values(strength="mandatory"))
+    approve_requirements(session, request.id, actor)
+    open_request(session, request.id, actor)
+    matches = run_match(session, request.id, actor)
+    verdicts = [_verdicts(session, match.id)["consulting"] for match in matches]
+    assert verdicts.count("meets") == total
+    assert absent.candidate_id is not None
+    assert verdicts.count("unmet") == 1  # the CV that never says it, read in full
+
+
+def test_a_skill_absent_from_a_fully_read_cv_is_unmet_but_unknown_after_ocr(session):
+    """A CV read from its text layer that never names the skill does not have it. An OCR reading can drop words, so
+    the same absence there is unknown and a person checks."""
+    from app.models import CandidateDocument
+
+    read = _run(session, "read.pdf", make_pdf(GRACE), extractor=DeterministicExtractor(), embedder=LocalFeatureEmbedder())
+    scanned = _run(session, "scan.pdf", make_pdf(PAT.replace("Python", "Pyth0n")), extractor=DeterministicExtractor(), embedder=LocalFeatureEmbedder())
+    session.get(CandidateDocument, scanned.id).text_source = "ocr"
+    session.flush()
+    actor = _actor(session)
+    request = create_request(
+        session,
+        company_name="Northwind",
+        job_title="Analyst",
+        description="Required skills: Python",
+        received_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        actor=actor,
+    )
+    extract_requirements(session, request.id, actor)
+    approve_requirements(session, request.id, actor)
+    open_request(session, request.id, actor)
+    by_candidate = {match.candidate_id: match for match in run_match(session, request.id, actor)}
+    assert _verdicts(session, by_candidate[read.candidate_id].id)["python"] == "unmet"
+    assert by_candidate[read.candidate_id].disposition == "excluded"
+    assert _verdicts(session, by_candidate[scanned.candidate_id].id)["python"] == "unknown"
+    assert by_candidate[scanned.candidate_id].disposition == "needs_review"
+
+
+def test_a_one_line_comma_list_is_read_as_separate_skills():
+    from app.domain.requirements import quote_in_description
+
+    for description, expected in (
+        ("python, postgres, fastapi", ["python", "postgres", "fastapi"]),
+        ("Skills: python, postgres, fastapi", ["python", "postgres", "fastapi"]),
+        ("Python, Postgres and FastAPI", ["Python", "Postgres", "FastAPI"]),
+        ("Tech stack: React, Node.js, AWS", ["React", "Node.js", "AWS"]),
+    ):
+        rows = parse_job_requirements(description)
+        assert [row.text for row in rows] == expected, description
+        assert all(row.label == "skill" and row.strength == "mandatory" for row in rows)
+        assert all(quote_in_description(description, row.quote) for row in rows)
+
+
+def test_a_sentence_with_commas_is_not_a_skill_list():
+    assert parse_job_requirements("We are hiring fast, friendly people for our team") == []
+    # One list line among many sentences is still not read as a bare list.
+    long = "\n".join(["We build tools for hospitals and clinics across the region."] * 8 + ["Python, SQL, AWS"])
+    assert [row.text for row in parse_job_requirements(long)] == []
+
+
+def test_skill_spellings_and_whole_word_mentions():
+    from app.services.matching import _mention_pattern, _skill_names
+
+    def named(requirement: str, line: str) -> bool:
+        return bool(_mention_pattern(_skill_names(requirement)).search(line))
+
+    assert named("postgres", "Supabase (PostgreSQL), GitHub")
+    assert named("PostgreSQL", "used Postgres daily")
+    assert named("Python", "Built REST APIs in Python.")
+    assert named("Node.js", "NodeJS and React")
+    assert named("C++", "C++, Java")
+    assert not named("Java", "JavaScript, TypeScript")
+    assert not named("C", "C++ only")
+    assert not named("Python", "Monty-Pythonic humour")
+
+
+def test_an_experience_verdict_says_how_the_years_were_added_up(session):
+    """The evidence for "2 years experience — Meets" was one dated line that alone showed less than two years.
+    The payload now carries the calculation the verdict actually used."""
+    _ingest_four(session)
+    actor = _actor(session)
+    request = create_request(
+        session,
+        company_name="Northwind",
+        job_title="Analyst",
+        description="Minimum experience: 1 years",
+        received_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        actor=actor,
+    )
+    extract_requirements(session, request.id, actor)
+    approve_requirements(session, request.id, actor)
+    open_request(session, request.id, actor)
+    run_match(session, request.id, actor)
+    session.commit()
+    with TestClient(app) as client:
+        matches = client.get(f"/hiring-requests/{request.id}/matches", headers=RECRUITER).json()["matches"]
+    rows = [r for m in matches for r in m["requirements"] if r["label"] == "experience" and r["result"] == "meets"]
+    assert rows, matches
+    assert all(r["calculation"] and "years" in r["calculation"] for r in rows)
+    unknown = [r for m in matches for r in m["requirements"] if r["result"] == "unknown"]
+    assert all(r["calculation"] is None for r in unknown)

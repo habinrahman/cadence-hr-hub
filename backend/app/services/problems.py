@@ -156,3 +156,70 @@ def _role(session: Session, actor: Actor, role: str) -> User:
     if user.role != role:
         raise TransitionError("forbidden")
     return user
+
+
+def diagnostics(session: Session, row: ProblemReport) -> dict:
+    """What an engineer needs to reproduce the report, without personal data: the agent runs, background jobs and
+    audit codes for the request, file or candidate it names. Agent runs and audit rows hold ids, hashes and codes
+    only (see models.AgentRun and services.audit); job payloads hold ids. Read at view time, never copied."""
+    from sqlalchemy import or_, select
+
+    from app.models import AgentRun, AuditEvent, Job
+
+    if row.entity_id is None:
+        return {"agent_runs": [], "jobs": [], "audit": []}
+    key = str(row.entity_id)
+    run_filter = {
+        "hiring_request": AgentRun.request_id == row.entity_id,
+        "document": AgentRun.document_id == row.entity_id,
+        "candidate": AgentRun.candidate_id == row.entity_id,
+    }.get(row.entity_type)
+    runs = session.scalars(select(AgentRun).where(run_filter).order_by(AgentRun.created_at.desc()).limit(20)).all() if run_filter is not None else []
+    job_filter = or_(Job.document_id == row.entity_id, Job.payload["request_id"].astext == key)
+    jobs = session.scalars(select(Job).where(job_filter).order_by(Job.created_at.desc()).limit(20)).all()
+    events = session.scalars(
+        select(AuditEvent)
+        .where(
+            or_(
+                AuditEvent.entity_id == row.entity_id,
+                AuditEvent.detail["request_id"].astext == key,
+                AuditEvent.detail["document_id"].astext == key,
+                AuditEvent.detail["candidate_id"].astext == key,
+            )
+        )
+        .order_by(AuditEvent.created_at.desc())
+        .limit(30)
+    ).all()
+    return {
+        "agent_runs": [
+            {
+                "id": str(run.id),
+                "agent": run.agent_name,
+                "model": run.model,
+                "prompt_version": run.prompt_version,
+                "input_hash": run.input_hash,
+                "status": run.status,
+                "validation_result": run.validation_result,
+                "error_code": run.error_code,
+                "output_ref": run.output_ref,
+                "latency_ms": run.latency_ms,
+                "created_at": run.created_at.isoformat(),
+            }
+            for run in runs
+        ],
+        "jobs": [
+            {
+                "id": str(job.id),
+                "type": job.job_type,
+                "status": job.status,
+                "attempts": job.attempts,
+                "error_code": getattr(job, "error_code", None),
+                "created_at": job.created_at.isoformat(),
+            }
+            for job in jobs
+        ],
+        "audit": [
+            {"action": event.action, "actor_kind": event.actor_kind, "detail": event.detail, "created_at": event.created_at.isoformat()}
+            for event in events
+        ],
+    }

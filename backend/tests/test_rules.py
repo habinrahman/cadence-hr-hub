@@ -68,9 +68,10 @@ def test_exact_contact_recommends_an_update_without_deciding_it():
     assert email.relationship == "updated_cv"
     assert email.confidence >= 0.85
     assert email.recommended_action == ACCEPT_UPDATE
+    # A phone number alone is strong evidence, but weaker than an email.
     assert phone.relationship == "updated_cv"
-    assert phone.confidence >= 0.85
-    assert phone.recommended_action == ACCEPT_UPDATE
+    assert 0.75 <= phone.confidence < email.confidence
+    assert phone.recommended_action is None
     assert any(item.code == "email" and item.state == "matched" for item in email.signals)
     assert any(item.code == "phone" and item.state == "matched" for item in phone.signals)
 
@@ -157,14 +158,11 @@ def test_conflicting_contacts_are_not_one_recommendation():
 
 def test_agent_cannot_take_consequential_transitions():
     review = Row("pending")
-    shortlist = Row("approved")
-    request = Row("pending_approval")
-    with pytest_raises():
-        transition(review, "accepted_update", machine="duplicate_review", actor=AGENT)
-    with pytest_raises():
-        transition(shortlist, "shared", machine="shortlist", actor=SYSTEM)
-    with pytest_raises():
-        transition(request, "shared", machine="hiring_request", actor=AGENT)
+    for actor in (AGENT, SYSTEM):
+        for outcome in ("accepted_update", "recorded_duplicate", "created_separate"):
+            with pytest_raises():
+                transition(review, outcome, machine="duplicate_review", actor=actor)
+            assert review.status == "pending"
     user = Actor(kind="user", user_id=uuid4())
     transition(review, "accepted_update", machine="duplicate_review", actor=user)
     assert review.status == "accepted_update"

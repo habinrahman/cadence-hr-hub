@@ -6,13 +6,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { searchCandidates, type SearchHit } from "@/lib/api";
 import { FILTERS, groupHits, hasCriteria, parseSearch, toQueryString } from "@/lib/search-state";
 import { plural } from "@/lib/format";
-import { Button } from "@/components/ui/button";
+import { Button, LinkButton } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { Field, inputClass } from "@/components/ui/field";
-import { Menu, MenuItem } from "@/components/ui/menu";
+import { Icon } from "@/components/ui/icons";
 import { PageHeader, Panel } from "@/components/ui/panel";
 import { PanelSkeleton } from "@/components/ui/skeleton";
 import { EmptyState, ErrorState } from "@/components/ui/states";
+import { Directory } from "./directory";
 import { ResultGroup } from "./result-group";
 
 const EXAMPLES = [
@@ -30,7 +31,6 @@ export function Search() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const runId = useRef(0);
-  const announce = useRef<HTMLParagraphElement>(null);
 
   // Keep the form in step with the URL, then search whenever the URL carries criteria.
   const key = toQueryString(applied);
@@ -82,70 +82,82 @@ export function Search() {
   return (
     <>
       <PageHeader
-        hue="candidate"
-        title="Candidates"
-        sub="Search inside confirmed CVs. Each result shows the candidate, why they matched, and the passage that says so."
+        eyebrow="Candidate workspace"
+        title="Candidate intelligence"
+        sub="Browse every confirmed profile, or search inside the CVs. Each search result shows who matched, why, and the passage that says so."
+        actions={
+          <LinkButton variant="primary" size="lg" href="/intake">
+            Import CVs <Icon name="upload" size={16} />
+          </LinkButton>
+        }
       />
 
-      <Panel as="section" className="mb-5 p-4">
-        <form onSubmit={submit} role="search" aria-label="Candidate search">
-          <Field label="Words in the CV">
-            {({ id }) => (
-              <input
-                id={id}
-                className={inputClass}
-                value={draft.q ?? ""}
-                placeholder="For example: python backend engineer postgresql"
-                onChange={(event) => setDraft({ ...draft, q: event.target.value })}
-              />
-            )}
-          </Field>
-
-          {activeFilters.length > 0 ? (
-            <div className="mt-3 grid grid-cols-[minmax(0,1fr)] gap-3 sm:grid-cols-2">
-              {activeFilters.map((f) => (
-                <div key={f.name} className="flex items-end gap-2">
-                  <div className="min-w-0 flex-1">
-                    <Field label={f.label} hint={f.note}>
-                      {({ id, describedBy }) => (
-                        <input
-                          id={id}
-                          aria-describedby={describedBy}
-                          className={inputClass}
-                          inputMode={f.name === "min_years" ? "decimal" : undefined}
-                          value={draft[f.name] ?? ""}
-                          onChange={(event) => setDraft({ ...draft, [f.name]: event.target.value })}
-                        />
-                      )}
-                    </Field>
-                  </div>
-                  <Button aria-label={`Remove the ${f.label} filter`} onClick={() => remove(f.name)}>
-                    Remove
-                  </Button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <Button type="submit" variant="primary" busy={busy}>
-              Search
-            </Button>
-            {available.length > 0 ? (
-              <Menu label="+ Add filter">
-                {available.map((f) => (
-                  <MenuItem key={f.name} onSelect={() => setDraft({ ...draft, [f.name]: draft[f.name] ?? " " })}>
-                    {f.label}
-                  </MenuItem>
-                ))}
-              </Menu>
-            ) : null}
+      <form onSubmit={submit} role="search" aria-label="Candidate search" className="mb-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex min-h-11 min-w-0 flex-1 basis-80 items-center gap-2.5 border border-rule-strong/60 bg-panel px-3.5 focus-within:border-human sm:max-w-[34rem]">
+            <Icon name="search" size={17} className="text-mut" />
+            <label htmlFor="q" className="sr-only">
+              Words in the CV
+            </label>
+            <input
+              id="q"
+              value={draft.q ?? ""}
+              placeholder="Search candidates, skills, or roles"
+              className="min-h-10 w-full bg-transparent text-[14px] outline-none placeholder:text-mut"
+              onChange={(event) => setDraft({ ...draft, q: event.target.value })}
+            />
           </div>
-          <p className="mt-3 text-xs text-mut">
-            Filters combine with AND. Only confirmed profiles are searched. Nationality searches words already written in the CV.
-          </p>
-        </form>
-      </Panel>
+          <Button type="submit" variant="primary" size="lg" busy={busy}>
+            Search
+          </Button>
+        </div>
+
+        <div className="mt-3.5 flex flex-wrap items-center gap-2" role="group" aria-label="Add a filter">
+          <span className="mr-1 inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-mut">
+            <Icon name="filter" size={14} /> Filters
+          </span>
+          {available.map((f) => (
+            <button
+              key={f.name}
+              type="button"
+              onClick={() => setDraft({ ...draft, [f.name]: draft[f.name] ?? " " })}
+              className="inline-flex min-h-11 items-center gap-1.5 border border-rule bg-panel px-3 text-[13px] text-ink hover:border-rule-strong sm:min-h-8"
+            >
+              {f.label}
+              <Icon name="plus" size={13} className="text-mut" />
+            </button>
+          ))}
+        </div>
+
+        {activeFilters.length > 0 ? (
+          <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {activeFilters.map((f) => (
+              <div key={f.name} className="flex items-end gap-2">
+                <div className="min-w-0 flex-1">
+                  <Field label={f.label} hint={f.note}>
+                    {({ id, describedBy }) => (
+                      <input
+                        id={id}
+                        aria-describedby={describedBy}
+                        className={inputClass}
+                        inputMode={f.name === "min_years" ? "decimal" : undefined}
+                        value={draft[f.name] ?? ""}
+                        onChange={(event) => setDraft({ ...draft, [f.name]: event.target.value })}
+                      />
+                    )}
+                  </Field>
+                </div>
+                <Button aria-label={`Remove the ${f.label} filter`} onClick={() => remove(f.name)}>
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <p className="mt-3 text-[12.5px] text-mut">
+          Filters combine with AND. Only confirmed profiles are searched. Nationality searches words already written in the CV.
+        </p>
+      </form>
 
       {Object.keys(applied).length > 0 ? (
         <p className="mb-3 flex flex-wrap items-center gap-1.5" aria-label="Active criteria">
@@ -157,7 +169,7 @@ export function Search() {
         </p>
       ) : null}
 
-      <p ref={announce} role="status" aria-live="polite" className="sr-only">
+      <p role="status" aria-live="polite" className="sr-only">
         {busy ? "Searching" : hits ? `${plural(groups.length, "candidate")} found` : ""}
       </p>
 
@@ -170,38 +182,53 @@ export function Search() {
       ) : null}
 
       {!busy && !error && !hasCriteria(applied) ? (
-        <EmptyState
-          title="Search the CVs"
-          body="Type words, add a filter, or start from an example."
-          action={
-            <ul className="flex flex-wrap justify-center gap-2">
-              {EXAMPLES.map((e) => (
-                <li key={e.href}>
-                  <Link href={e.href} prefetch={false} className="inline-flex min-h-11 items-center rounded-[3px] border border-rule-strong bg-panel px-3 text-[13px] font-semibold no-underline hover:bg-inset">
-                    {e.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          }
-        />
+        <div className="space-y-5">
+          <p className="flex flex-wrap items-center gap-2 text-[13px] text-mut">
+            <span className="font-mono text-[11px] uppercase tracking-[0.12em]">Try</span>
+            {EXAMPLES.map((e) => (
+              <Link
+                key={e.href}
+                href={e.href}
+                prefetch={false}
+                className="inline-flex min-h-11 items-center border border-rule bg-panel px-3 text-[13px] text-ink no-underline hover:border-rule-strong sm:min-h-8"
+              >
+                {e.label}
+              </Link>
+            ))}
+          </p>
+          <Directory />
+        </div>
       ) : null}
 
       {!busy && !error && hits !== null && hasCriteria(applied) ? (
         groups.length === 0 ? (
-          <EmptyState
-            title="No matches"
-            body="Nothing in the confirmed CVs fits every criterion. Remove the most specific filter and try again."
-          />
+          <EmptyState title="No matches" body="Nothing in the confirmed CVs fits every criterion. Remove the most specific filter and try again." />
         ) : (
           <section aria-label="Results">
-            <p className="mb-2 text-mut">
-              {plural(groups.length, "candidate")} · {plural(hits.length, "passage")} · ordered by relevance (no score shown)
-            </p>
             <Panel>
-              {groups.map((g) => (
-                <ResultGroup key={g.key} group={g} highlight={highlight} />
-              ))}
+              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule px-5 py-3.5">
+                <p className="text-[14px]">
+                  <span className="text-[18px] font-semibold">{groups.length}</span>{" "}
+                  <span className="text-mut">
+                    {groups.length === 1 ? "candidate" : "candidates"} · {plural(hits.length, "passage")}
+                  </span>
+                </p>
+                <p className="text-[12.5px] text-human-ink">Ordered by relevance (no score shown)</p>
+              </div>
+              <div
+                aria-hidden="true"
+                className="hidden grid-cols-[17rem_minmax(0,17rem)_minmax(0,1fr)_2rem] gap-6 border-b border-rule bg-inset px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.12em] text-mut xl:grid"
+              >
+                <span>Candidate</span>
+                <span>Why it matched</span>
+                <span>Evidence</span>
+                <span />
+              </div>
+              <ul>
+                {groups.map((g) => (
+                  <ResultGroup key={g.key} group={g} highlight={highlight} />
+                ))}
+              </ul>
             </Panel>
           </section>
         )

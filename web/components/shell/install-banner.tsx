@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
-import { MenuItem } from "@/components/ui/menu";
 import {
   DISMISS_TTL_MS,
   isStandalone,
@@ -92,13 +91,6 @@ function useInstallAction() {
   const { canInstall, isIos, install } = useInstallPrompt();
   const available = !isStandalone() && (canInstall || isIos);
   return { available, run: () => (canInstall ? void install() : setInstallHelp(true)) };
-}
-
-/** A permanent way back for people who dismissed the banner. Renders nothing when installing is not possible. */
-export function InstallMenuItem() {
-  const { available, run } = useInstallAction();
-  if (!available) return null;
-  return <MenuItem onSelect={run}>Install app</MenuItem>;
 }
 
 export function InstallLink() {

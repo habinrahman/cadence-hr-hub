@@ -71,8 +71,7 @@ export function ReportDesk() {
   return (
     <>
       <PageHeader
-        hue="rel"
-        title="Problem reports"
+title="Problem reports"
         sub="Describe the problem in your own words. Context is limited to an error code, a route and an action. Candidate details are never attached."
       />
 
@@ -98,7 +97,7 @@ export function ReportDesk() {
             </Field>
             <Field label="What happened?" error={errors.description}>
               {({ id, describedBy, invalid }) => (
-                <textarea id={id} aria-describedby={describedBy} aria-invalid={invalid} className={`${inputClass} min-h-28`} value={description} onChange={(e) => setDescription(e.target.value)} />
+                <textarea id={id} aria-describedby={describedBy} aria-invalid={invalid} className={`${inputClass} min-h-28 sm:min-h-28`} value={description} onChange={(e) => setDescription(e.target.value)} />
               )}
             </Field>
             <Field label="Related record">

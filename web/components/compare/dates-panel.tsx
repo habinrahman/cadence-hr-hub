@@ -10,30 +10,30 @@ function Fact({ fact }: { fact: CompareDateFact | undefined }) {
   );
 }
 
-const NEWER = { incoming: "the incoming CV", existing: "the existing CV", same: "neither (same date)" } as const;
+const NEWER = { incoming: "the new CV", existing: "the previous CV", same: "neither (same date)" } as const;
 
 /** Dates as the CVs state them, with their source page. Nothing here is inferred from a filename. */
 export function DatesPanel({ dates }: { dates: CompareDates }) {
   return (
     <section aria-labelledby="dates-heading">
-      <h2 id="dates-heading" className="mb-2 text-xs font-bold uppercase tracking-[0.07em] text-human-ink">
+      <h2 id="dates-heading" className="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-mut">
         Dates
       </h2>
       {dates.conflict ? (
-        <p role="alert" className="mb-2 rounded border border-prop bg-prop-bg px-3 py-2 text-[13px] font-semibold text-prop-ink">
+        <p role="alert" className="mb-2 border border-prop bg-prop-bg px-3 py-2 text-[13px] font-semibold text-prop-ink">
           Date information conflicts. The version date the CVs label points to {dates.newer_by_labelled ? NEWER[dates.newer_by_labelled] : "one CV"},
           while the latest date mentioned points to {dates.newer_by_mentioned ? NEWER[dates.newer_by_mentioned] : "the other"}. Read both
           before deciding.
         </p>
       ) : null}
-      <div className="overflow-x-auto rounded border border-rule bg-panel">
+      <div className="overflow-x-auto border border-rule bg-panel">
         <table className="w-full border-collapse text-left text-[13px]">
           <caption className="sr-only">Dates read from each CV</caption>
           <thead>
             <tr className="bg-inset text-[11px] uppercase tracking-wider text-human-ink">
               <th scope="col" className="px-3 py-1.5 font-bold">Date</th>
-              <th scope="col" className="px-3 py-1.5 font-bold">Existing CV</th>
-              <th scope="col" className="px-3 py-1.5 font-bold">Incoming CV</th>
+              <th scope="col" className="px-3 py-1.5 font-bold">Previous CV</th>
+              <th scope="col" className="px-3 py-1.5 font-bold">New CV</th>
             </tr>
           </thead>
           <tbody>

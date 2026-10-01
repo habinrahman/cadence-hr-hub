@@ -1,37 +1,49 @@
 import { describe, it, expect } from "vitest";
 import { deriveLifecycle } from "@/lib/lifecycle";
 
-const base = { requirements: [], matchCount: 0, shortlisted: 0, sharesApproved: 0, shared: 0 };
+const base = { processing: "complete" as const, matchCount: 23, reviewed: 0, shortlisted: 0, sharesApproved: 0, shared: 0 };
 const states = (i: Parameters<typeof deriveLifecycle>[0]) => deriveLifecycle(i).map((s) => s.state);
 
 describe("deriveLifecycle", () => {
-  it("starts on requirements when none exist", () => {
-    expect(states(base)).toEqual(["done", "current", "locked", "locked"]);
+  it("has the seven stages in order, without a requirement-approval step", () => {
+    expect(deriveLifecycle(base).map((s) => s.label)).toEqual([
+      "Received",
+      "Requirements extracted",
+      "Matching complete",
+      "HR review",
+      "Shortlisted",
+      "Share approved",
+      "Shared",
+    ]);
   });
-  it("stays on requirements while any is unapproved", () => {
-    const r = [{ review_status: "approved" }, { review_status: "proposed" }];
-    expect(states({ ...base, requirements: r })).toEqual(["done", "current", "locked", "locked"]);
+  it("is waiting on extraction while received", () => {
+    expect(states({ ...base, processing: "received", matchCount: 0 })).toEqual(["done", "current", "locked", "locked", "locked", "locked", "locked"]);
   });
-  it("moves to review once all are approved", () => {
-    const r = [{ review_status: "approved" }];
-    expect(states({ ...base, requirements: r })).toEqual(["done", "done", "current", "locked"]);
+  it("is waiting on matching while extracting is done", () => {
+    expect(states({ ...base, processing: "matching", matchCount: 0 })).toEqual(["done", "done", "current", "locked", "locked", "locked", "locked"]);
   });
-  it("moves to share once someone is shortlisted", () => {
-    const r = [{ review_status: "approved" }];
-    expect(states({ ...base, requirements: r, matchCount: 3, shortlisted: 1 })).toEqual(["done", "done", "done", "current"]);
+  it("hands over to HR review once matching completes", () => {
+    expect(states(base)).toEqual(["done", "done", "done", "current", "locked", "locked", "locked"]);
+  });
+  it("moves to shortlist after HR has decided on someone", () => {
+    expect(states({ ...base, reviewed: 3 })).toEqual(["done", "done", "done", "done", "current", "locked", "locked"]);
+  });
+  it("moves to share approval once someone is shortlisted", () => {
+    expect(states({ ...base, reviewed: 5, shortlisted: 5 })).toEqual(["done", "done", "done", "done", "done", "current", "locked"]);
   });
   it("completes when a share was sent", () => {
-    const r = [{ review_status: "approved" }];
-    expect(states({ ...base, requirements: r, matchCount: 3, shortlisted: 1, sharesApproved: 1, shared: 1 })).toEqual(["done", "done", "done", "done"]);
+    expect(states({ ...base, reviewed: 5, shortlisted: 5, sharesApproved: 1, shared: 1 })).toEqual(Array(7).fill("done"));
   });
-  it("treats unknown shortlist state as not done and says so", () => {
-    const r = [{ review_status: "approved" }];
-    const steps = deriveLifecycle({ ...base, requirements: r, matchCount: 3, shortlisted: null });
-    expect(steps[2].state).toBe("current");
-    expect(steps[2].detail).toMatch(/unknown/i);
+  it("shows the failure on the processing step", () => {
+    const steps = deriveLifecycle({ ...base, processing: "failed", matchCount: 0 });
+    expect(steps[1].detail).toMatch(/failed/i);
   });
-  it("details count proposals and approvals", () => {
-    const r = [{ review_status: "approved" }, { review_status: "proposed" }, { review_status: "proposed" }];
-    expect(deriveLifecycle({ ...base, requirements: r })[1].detail).toBe("1 approved · 2 proposed");
+  it("treats an unknown shortlist as not done and says so", () => {
+    const steps = deriveLifecycle({ ...base, shortlisted: null });
+    expect(steps[4].detail).toMatch(/unknown/i);
+  });
+  it("says how far sharing got", () => {
+    const steps = deriveLifecycle({ ...base, reviewed: 1, shortlisted: 1, sharesApproved: 1 });
+    expect(steps[5].detail).toBe("1 approved, not sent");
   });
 });

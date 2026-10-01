@@ -29,6 +29,24 @@ describe("queue", () => {
     expect(g[0].names).toEqual(["Amira Khan", "Jonas Weber"]);
     expect(g[0].subject).toBe("Example Labs · Backend engineer");
   });
+  it("uses the server's per-request count", () => {
+    const g = groupQueue([
+      { ...item("match_review", "Example Labs · Backend engineer", "/hiring?request=r1"), count: 12 },
+      { ...item("requirement_approval", "Example Labs · Backend engineer", "/hiring?request=r1"), count: 3 },
+    ]);
+    expect(g.map((x) => x.count).sort((a, b) => a - b)).toEqual([3, 12]);
+    expect(g.find((x) => x.type === "match_review")!.subject).toBe("Example Labs · Backend engineer");
+    expect(g.find((x) => x.type === "match_review")!.names).toEqual([]);
+  });
+  it("carries the recommendation so the queue can show it", () => {
+    const g = groupQueue([
+      { ...item("relationship_review", "Nola Lum", "/?document=d1"), relationship: "updated_cv", recommended_action: "accept_update", confidence: 100 },
+      { ...item("relationship_review", "Sam", "/?document=d2"), relationship: "updated_cv", recommended_action: null, confidence: 62 },
+    ]);
+    const lum = g.find((x) => x.subject === "Nola Lum")!;
+    expect([lum.relationship, lum.recommendedAction, lum.confidence]).toEqual(["updated_cv", "accept_update", 100]);
+    expect(g.find((x) => x.subject === "Sam")!.recommendedAction).toBeNull();
+  });
   it("keeps relationship and share rows separate", () => {
     const g = groupQueue([
       item("relationship_review", "Amira Khan", "/?document=d1"),

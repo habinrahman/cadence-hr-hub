@@ -36,6 +36,14 @@ def candidate_profile(session: Session, candidate: Candidate) -> dict:
             .order_by(CandidateDocument.received_at.desc())
         ).all()
     )
+    # The newest relationship review per document, so the page never has to probe for one.
+    reviews: dict = {}
+    for document_id, review_id in session.execute(
+        select(DuplicateReview.document_id, DuplicateReview.id)
+        .where(DuplicateReview.document_id.in_([row.id for row in documents]))
+        .order_by(DuplicateReview.created_at)
+    ):
+        reviews[document_id] = str(review_id)
     applications = list(
         session.scalars(
             select(Application)
@@ -95,6 +103,7 @@ def candidate_profile(session: Session, candidate: Candidate) -> dict:
                 "is_current": row.is_current,
                 "received_at": row.received_at.isoformat(),
                 "supersedes_document_id": str(row.supersedes_document_id) if row.supersedes_document_id else None,
+                "review_id": reviews.get(row.id),
             }
             for row in documents
         ],

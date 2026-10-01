@@ -28,13 +28,13 @@ export function WhyRelated({
   const ordered = [...relevant].sort((a, b) => b.weight - a.weight);
   return (
     <section aria-labelledby="why-heading">
-      <h2 id="why-heading" className="mb-2 text-xs font-bold uppercase tracking-[0.07em] text-human-ink">
+      <h2 id="why-heading" className="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-mut">
         Why Cadence thinks these are related
       </h2>
       {ordered.length === 0 ? (
         <p className="text-mut">No signals were recorded for this review.</p>
       ) : (
-        <ul className="divide-y divide-rule rounded border border-rule bg-panel">
+        <ul className="divide-y divide-rule border border-rule bg-panel">
           {ordered.map((signal) => {
             const described = describeSignal(signal, context);
             return (
@@ -46,7 +46,9 @@ export function WhyRelated({
                   <span className="sr-only">{KIND_LABEL[described.kind]}: </span>
                   {described.text}
                 </span>
-                {signal.weight > 0 ? <span className="shrink-0 text-xs text-mut">weight {signal.weight}</span> : null}
+                {signal.weight > 0 && signal.state !== "unknown" ? (
+                  <span className="shrink-0 text-xs text-mut">weight {signal.weight}</span>
+                ) : null}
               </li>
             );
           })}
@@ -54,8 +56,9 @@ export function WhyRelated({
       )}
       {confidence !== null ? (
         <p className="mt-1.5 text-xs text-mut">
-          Signal strength {Math.round(confidence)} / 100, weighted from the signals above. It is a score of these signals, not a
-          model&apos;s confidence.
+          Same-person confidence {Math.round(confidence)} / 100, from the email, phone, name and content overlap above. Signals
+          that are not available are left out and do not lower it; a different email or phone does. Dates only decide update
+          or duplicate. It is a score of these signals, not a model&apos;s confidence.
         </p>
       ) : null}
     </section>

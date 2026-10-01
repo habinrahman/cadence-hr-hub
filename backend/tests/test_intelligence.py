@@ -441,3 +441,31 @@ def test_quarantine_ocr_and_pending_review_are_not_confirmed_profiles(session):
     confirmed = hybrid_search(session, query="ledger", embedder=LocalFeatureEmbedder())
     assert {hit.candidate_id for hit in confirmed} == {ada.candidate_id}
     assert all(hit.confirmed_profile for hit in confirmed)
+
+
+def test_prose_under_education_does_not_reject_the_whole_cv():
+    long_line = "Analyzed satellite data and generated figures using Python for a formal research paper. " * 5
+    assert len(long_line) > 300
+    text = "\n".join(
+        [
+            "Ada Lovelace",
+            "ada@example.com",
+            "Education",
+            "University of Example, BSc Mathematics",
+            long_line,
+            f"University of Example, {long_line}",
+            "Experience",
+            long_line,
+            "2020-01-01 to 2022-01-01",
+            "Analytical Engines, Engineer",
+            "2020-01-01 to 2022-01-01",
+            "Skills",
+            "Python, SQL",
+        ]
+    )
+    draft = DeterministicExtractor().extract(document_id=uuid4(), source_text=text, prompt_version="test")
+    assert [item.institution for item in draft.education] == ["University of Example", "University of Example"]
+    assert draft.education[0].credential == "BSc Mathematics"
+    assert draft.education[1].credential is None
+    assert [item.employer for item in draft.experiences] == ["Analytical Engines"]
+    assert [item.name for item in draft.skills] == ["Python", "SQL"]

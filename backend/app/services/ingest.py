@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -37,6 +37,8 @@ def ingest_bytes(
         raise UnsupportedFile()
     media_type = detect_media_type(data)
     digest = sha256_bytes(data)
+    # Serialise uploads of identical bytes so a retry or a duplicate file in a batch cannot race past the lookup.
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:digest, 0))"), {"digest": digest})
     existing = session.scalar(select(CandidateDocument).where(CandidateDocument.sha256 == digest))
     if existing is not None:
         write_audit(

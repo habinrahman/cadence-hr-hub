@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import type { Review } from "@/lib/api";
-import { ACTION_LABELS, RELATIONSHIP_LABELS, labelAudit } from "@/lib/labels";
+import { decisionCopy } from "@/lib/compare";
+import { RELATIONSHIP_LABELS, actionLabel, labelAudit } from "@/lib/labels";
 import { plural } from "@/lib/format";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/dialog";
 import { Tag } from "@/components/ui/tag";
 import { DecisionCase } from "./decision-case";
 import { SignalList } from "./signal-list";
@@ -29,6 +32,9 @@ export function RelationshipReview({
   candidateHref?: (id: string) => string;
   compact?: boolean;
 }) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const hasDocument = review.document_id != null;
+  const copy = confirming ? decisionCopy(confirming, hasDocument) : null;
   const pending = review.status === "pending";
   const relationship = review.likely_relationship
     ? (RELATIONSHIP_LABELS[review.likely_relationship] ?? review.likely_relationship)
@@ -44,12 +50,12 @@ export function RelationshipReview({
     review.recommended_action ? (
       <div>
         <p className="font-semibold">
-          {relationship}: {ACTION_LABELS[review.recommended_action] ?? review.recommended_action}
+          {relationship}: {actionLabel(review.recommended_action, hasDocument)}
         </p>
         {review.confidence !== null ? (
           <p className="mt-0.5 text-xs text-prop-ink">
-            Signal strength {Math.round(review.confidence)} / 100, weighted from the signals above. It is not a model&apos;s
-            confidence.
+            Same-person confidence {Math.round(review.confidence)} / 100, from the signals above. Signals that are not
+            available do not lower it. It is not a model&apos;s confidence.
           </p>
         ) : null}
       </div>
@@ -61,6 +67,7 @@ export function RelationshipReview({
   ) : null;
 
   return (
+    <>
     <DecisionCase
       hue="rel"
       found={
@@ -104,9 +111,9 @@ export function RelationshipReview({
                   key={action}
                   variant={action === review.recommended_action ? "primary" : "secondary"}
                   busy={busy}
-                  onClick={() => onDecide(action)}
+                  onClick={() => setConfirming(action)}
                 >
-                  {ACTION_LABELS[action] ?? action}
+                  {actionLabel(action, hasDocument)}
                 </Button>
               ))}
             </div>
@@ -118,5 +125,25 @@ export function RelationshipReview({
         )
       }
     />
+    <ConfirmDialog
+      open={confirming !== null}
+      title={copy?.title ?? ""}
+      body={
+        <div className="space-y-2">
+          <p>{copy?.body}</p>
+          <p className="text-xs text-mut">This decision is recorded in the audit trail with the time it was made.</p>
+        </div>
+      }
+      confirmLabel={copy?.confirmLabel ?? "Confirm"}
+      tone={copy?.tone ?? "primary"}
+      busy={busy}
+      onConfirm={() => {
+        const action = confirming;
+        setConfirming(null);
+        if (action) onDecide(action);
+      }}
+      onCancel={() => setConfirming(null)}
+    />
+    </>
   );
 }

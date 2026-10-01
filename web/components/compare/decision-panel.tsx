@@ -31,52 +31,75 @@ export function DecisionPanel({
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
   const decided = isDecided(review.status);
-  const copy = confirming ? decisionCopy(confirming) : null;
+  const copy = confirming ? decisionCopy(confirming, review.document_id != null) : null;
 
   return (
-    <section id="decision" aria-labelledby="decision-heading" className="rounded border-2 border-human-ink bg-panel px-3.5 py-3">
-      <h2 id="decision-heading" className="flex flex-wrap items-center gap-2 text-xs font-bold uppercase tracking-[0.07em] text-human-ink">
+    <section id="decision" aria-labelledby="decision-heading" className="border border-human-ink bg-panel">
+      <h2
+        id="decision-heading"
+        className="flex flex-wrap items-center justify-between gap-2 bg-human-ink px-4 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-white"
+      >
         Your decision
-        {decided ? <Tag tone="decided">Decided</Tag> : null}
+        {decided ? <span className="border border-white/70 px-1.5 py-px text-[10.5px]">Decided</span> : null}
       </h2>
-
+      <div className="px-4 py-3.5">
       {decided ? (
-        <p className="mt-2 font-semibold">{labelAudit(review.status)}</p>
+        <p className="font-semibold">{labelAudit(review.status)}</p>
       ) : (
         <>
-          <p className="mt-1 text-[13px] text-mut">
-            Nothing changes until you choose. The previous CV is never deleted; it stays in the candidate&apos;s history.
+          <p className="text-[13px] text-mut">
+            Nothing changes until you choose. Merge keeps the previous CV in the candidate&apos;s history. Delete Duplicate
+            archives only this duplicate upload; the candidate and their current CV are never touched.
           </p>
           {candidateMerged ? (
-            <p role="status" className="hatch mt-2 rounded border border-rule-strong px-2.5 py-1.5 text-[13px]">
+            <p role="status" className="hatch mt-2 border border-rule-strong px-2.5 py-1.5 text-[13px]">
               This candidate was merged into another profile, so attaching the CV to it is disabled.
             </p>
           ) : null}
-          <ul className="mt-3 space-y-2">
-            {review.offered_actions.map((action) => {
-              const text = decisionCopy(action);
-              const blocked = candidateMerged && action !== "create_separate_candidate";
-              const suggested = action === recommendedAction;
+          {(() => {
+            const suggested = recommendedAction && review.offered_actions.includes(recommendedAction) ? recommendedAction : null;
+            const others = review.offered_actions.filter((action) => action !== suggested);
+            const button = (action: string, main: boolean) => {
+              const text = decisionCopy(action, review.document_id != null);
               return (
-                <li key={action}>
-                  <Button
-                    variant={suggested ? "primary" : "secondary"}
-                    className="w-full justify-start whitespace-normal py-2 text-left"
-                    busy={busy}
-                    disabled={blocked}
-                    onClick={() => setConfirming(action)}
-                  >
-                    {text.label}
-                  </Button>
-                  {suggested ? <span className="mt-0.5 block text-xs text-prop-ink">Suggested by Cadence</span> : null}
-                </li>
+                <Button
+                  variant={main ? "primary" : "secondary"}
+                  size={main ? "lg" : "md"}
+                  className="w-full justify-start whitespace-normal py-2.5 text-left"
+                  busy={busy}
+                  disabled={candidateMerged && action !== "create_separate_candidate"}
+                  onClick={() => setConfirming(action)}
+                >
+                  {text.label}
+                </Button>
               );
-            })}
-          </ul>
+            };
+            return (
+              <>
+                {suggested ? (
+                  <div className="mt-3">
+                    {button(suggested, true)}
+                    <span className="mt-0.5 block text-xs text-prop-ink">Suggested by Cadence</span>
+                  </div>
+                ) : null}
+                {others.length > 0 ? (
+                  <div className={suggested ? "mt-4 border-t border-rule pt-3" : "mt-3"}>
+                    {suggested ? <p className="mb-1.5 text-[12px] text-mut">Or, if the evidence says otherwise:</p> : null}
+                    <ul className="space-y-1.5">
+                      {others.map((action) => (
+                        <li key={action}>{button(action, false)}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
         </>
       )}
 
       {record ? <div className="mt-3 border-t border-rule pt-2">{record}</div> : null}
+      </div>
 
       <ConfirmDialog
         open={confirming !== null}

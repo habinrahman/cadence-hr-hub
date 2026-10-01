@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.domain.actor import Actor
+from app.domain.matching import overall_disposition
 from app.domain.requirement_schema import ProposalRejected, validate_proposal
 from app.domain.transitions import TransitionError, transition
 from app.extraction.provider import ExtractorUnavailable
@@ -19,6 +20,7 @@ from app.models import (
     AgentRun,
     CandidateMatch,
     HiringRequest,
+    Job,
     MatchRequirementResult,
     RequestAttachment,
     RequestNote,
@@ -48,6 +50,8 @@ def create_request(
     description: str,
     received_at: datetime,
     actor: Actor,
+    requested_count: int | None = None,
+    contact_email: str | None = None,
 ) -> HiringRequest:
     user = _recruiter(session, actor)
     row = HiringRequest(
@@ -57,6 +61,8 @@ def create_request(
         status="draft",
         received_at=received_at,
         owner_user_id=user.id,
+        requested_count=requested_count,
+        contact_email=_contact(contact_email),
     )
     session.add(row)
     session.flush()
@@ -68,6 +74,65 @@ def create_request(
         entity_id=row.id,
         detail={"request_id": str(row.id), "outcome": "draft"},
     )
+    return row
+
+
+def set_contact(session: Session, request_id: UUID, contact_email: str, actor: Actor) -> HiringRequest:
+    """The company contact the shortlist goes to. Changing it is recorded; the address itself never enters the audit."""
+    _recruiter(session, actor)
+    row = locked_request(session, request_id)
+    value = _contact(contact_email)
+    if value is None:
+        raise HiringError("invalid_recipient")
+    if row.contact_email != value:
+        row.contact_email = value
+        write_audit(
+            session,
+            actor=actor,
+            action="request_contact_changed",
+            entity_type="hiring_request",
+            entity_id=row.id,
+            detail={"request_id": str(row.id), "human_action": "set_contact"},
+        )
+    return row
+
+
+def _contact(value: str | None) -> str | None:
+    from app.extraction.contacts import normalize_email
+
+    if value is None or not value.strip():
+        return None
+    normalized = normalize_email(value.strip())
+    if normalized is None:
+        raise HiringError("invalid_recipient")
+    return normalized
+
+
+def open_pool(session: Session, request_id: UUID, actor: Actor) -> HiringRequest:
+    _recruiter(session, actor)
+    row = _request(session, request_id)
+    if row.last_match_completed_at is None:
+        raise HiringError("pool_not_ready")
+    seen = row.pool_opened_at
+    if seen is not None and row.last_match_completed_at <= seen:
+        return row
+    row.pool_opened_at = utcnow()
+    write_audit(
+        session,
+        actor=actor,
+        action="pool_opened",
+        entity_type="hiring_request",
+        entity_id=row.id,
+        detail={"request_id": str(row.id), "outcome": "opened"},
+    )
+    return row
+
+
+def submit_request(session: Session, request_id: UUID, actor: Actor) -> HiringRequest:
+    _recruiter(session, actor)
+    row = _request(session, request_id)
+    if row.status == "draft":
+        transition(row, "submitted", machine="hiring_request", actor=actor)
     return row
 
 
@@ -119,7 +184,7 @@ def add_attachment(
 
 
 def extract_requirements(session: Session, request_id: UUID, actor: Actor, reader=None) -> list[RequestRequirement]:
-    _recruiter(session, actor)
+    _actor_allowed(session, actor)
     row = _request(session, request_id)
     reader = reader if reader is not None else get_requirement_reader()
     accepted, rejected, model_name, run_status = _propose(row.description, reader)
@@ -145,12 +210,13 @@ def extract_requirements(session: Session, request_id: UUID, actor: Actor, reade
         agent_name="requirement_extractor",
         request_id=row.id,
         model=model_name,
-        prompt_version="requirements-v1",
+        prompt_version=getattr(reader, "prompt_version", "requirements-v1"),
         input_hash=sha256_text(row.description),
         status=run_status,
         validation_result="partial" if rejected and accepted else "accepted" if accepted else "rejected",
-        output_ref=f"accepted:{len(stored)}",
-        error_code="extractor_unavailable" if run_status != "succeeded" else None,
+        # Counts and reason codes only. Never the job description or the proposed text.
+        output_ref=_output_ref(len(stored), rejected, getattr(reader, "failure", None) if run_status == "fallback" else None),
+        error_code="llm_unavailable" if run_status == "fallback" else "extractor_unavailable" if run_status != "succeeded" else None,
     )
     session.add(run)
     session.flush()
@@ -201,6 +267,11 @@ def update_requirement(
     row.strength = draft.strength
     row.source_quote = draft.quote
     row.review_status = "proposed"
+    has_pool = session.scalar(
+        select(func.count()).select_from(CandidateMatch).where(CandidateMatch.request_id == request_id)
+    )
+    if has_pool:
+        request.pool_stale = True
     write_audit(
         session,
         actor=actor,
@@ -225,7 +296,12 @@ def approve_requirements(
         .where(RequestRequirement.request_id == request_id)
         .order_by(RequestRequirement.position)
     ).all()
-    chosen = [row for row in rows if requirement_ids is None or row.id in set(requirement_ids)]
+    # "Approve all" never revives a requirement HR rejected; naming it explicitly does.
+    chosen = [
+        row
+        for row in rows
+        if (row.review_status != "rejected" if requirement_ids is None else row.id in set(requirement_ids))
+    ]
     if requirement_ids is not None and len(chosen) != len(set(requirement_ids)):
         raise HiringError("not_found")
     approved: list[RequestRequirement] = []
@@ -244,6 +320,9 @@ def approve_requirements(
             raise HiringError(exc.code) from exc
         row.review_status = "approved"
         approved.append(row)
+    if approved and request.last_match_completed_at is not None:
+        # The pool was built before this approval. It stays provisional until the approved-only rematch finishes.
+        request.pool_stale = True
     write_audit(
         session,
         actor=actor,
@@ -255,26 +334,159 @@ def approve_requirements(
     return approved
 
 
+def reject_requirement(session: Session, request_id: UUID, requirement_id: UUID, actor: Actor) -> RequestRequirement:
+    """HR rejects one proposed (or approved) requirement. The row is kept, labelled rejected, and never matched on.
+
+    If a pool exists it no longer reflects the requirements, so it is stale until the approved-only rematch runs."""
+    _recruiter(session, actor)
+    request = _request(session, request_id)
+    row = _requirement(session, request_id, requirement_id)
+    if row.review_status == "rejected":
+        return row
+    row.review_status = "rejected"
+    if request.last_match_completed_at is not None:
+        request.pool_stale = True
+    write_audit(
+        session,
+        actor=actor,
+        action="requirements_changed",
+        entity_type="request_requirement",
+        entity_id=row.id,
+        detail={"request_id": str(request_id), "outcome": "rejected", "strength": row.strength},
+    )
+    return row
+
+
+def _output_ref(accepted: int, rejected: dict[str, int], fallback_reason: str | None = None) -> str:
+    ref = f"accepted:{accepted}"
+    if rejected:
+        ref += ";rejected:" + ",".join(f"{code}={count}" for code, count in sorted(rejected.items()))
+    if fallback_reason:
+        # Why the model did not answer (description_too_long, model_unreachable, model_reply_malformed). A code, never text.
+        ref += f";fallback:{fallback_reason}"
+    return ref
+
+
+def _fallback_reason(ref: str | None) -> str | None:
+    for part in (ref or "").split(";"):
+        key, _, value = part.partition(":")
+        if key == "fallback" and value.replace("_", "").isalnum():
+            return value
+    return None
+
+
+def _parse_output_ref(ref: str | None) -> tuple[int | None, dict[str, int]]:
+    accepted: int | None = None
+    rejected: dict[str, int] = {}
+    for part in (ref or "").split(";"):
+        key, _, value = part.partition(":")
+        if key == "accepted" and value.isdigit():
+            accepted = int(value)
+        elif key == "rejected":
+            for item in value.split(","):
+                code, _, count = item.partition("=")
+                if code and count.isdigit():
+                    rejected[code] = int(count)
+    return accepted, rejected
+
+
+def add_requirement(
+    session: Session,
+    request_id: UUID,
+    actor: Actor,
+    *,
+    label: str,
+    text: str,
+    strength: str,
+    quote: str,
+) -> RequestRequirement:
+    """A recruiter adds a requirement by hand. It must still quote the job description and pass every check."""
+    _recruiter(session, actor)
+    request = _request(session, request_id)
+    try:
+        draft = validate_proposal(request.description, {"label": label, "text": text, "strength": strength, "quote": quote})
+    except ProposalRejected as exc:
+        raise HiringError(exc.code) from exc
+    position = (
+        session.scalar(select(func.max(RequestRequirement.position)).where(RequestRequirement.request_id == request_id)) or 0
+    ) + 1
+    row = RequestRequirement(
+        request_id=request_id,
+        position=position,
+        label=draft.label,
+        requirement_text=draft.text,
+        strength=draft.strength,
+        source_quote=draft.quote,
+        review_status="proposed",
+    )
+    session.add(row)
+    session.flush()
+    write_audit(
+        session,
+        actor=actor,
+        action="requirements_changed",
+        entity_type="request_requirement",
+        entity_id=row.id,
+        detail={"request_id": str(request_id), "outcome": "added", "strength": row.strength},
+    )
+    return row
+
+
 def _propose(description: str, reader):
     if reader is None:
-        return [], 0, None, "skipped"
+        return [], {}, None, "skipped"
     try:
         raw = reader.propose(description)
     except ExtractorUnavailable:
-        return [], 0, getattr(reader, "model_name", None), "failed"
+        return [], {}, getattr(reader, "model_name", None), "failed"
     accepted = []
-    rejected = 0
+    rejected: dict[str, int] = {}
     for item in raw:
         try:
             accepted.append(validate_proposal(description, item))
-        except ProposalRejected:
-            rejected += 1
-    return accepted, rejected, getattr(reader, "model_name", None), "succeeded"
+        except ProposalRejected as exc:
+            rejected[exc.code] = rejected.get(exc.code, 0) + 1
+    # A fallback is a different reader that answered. It is recorded as such, never as the model.
+    status = "fallback" if getattr(reader, "fallback_used", False) else "succeeded"
+    return accepted, rejected, getattr(reader, "model_name", None), status
+
+
+def pool_status(session: Session, request: HiringRequest) -> str:
+    """none: nothing matched yet. provisional: matched on requirements HR has not approved, or a rematch is pending.
+    confirmed: the last match ran on HR-approved requirements only, and every requirement is approved.
+
+    Only a confirmed pool can be shortlisted or shared. Viewing is never gated."""
+    if request.last_match_completed_at is None:
+        return "none"
+    statuses = session.execute(
+        select(RequestRequirement.review_status, func.count())
+        .where(RequestRequirement.request_id == request.id)
+        .group_by(RequestRequirement.review_status)
+    ).all()
+    counts = {status: count for status, count in statuses}
+    # Rejected rows are a decision HR made; only rows still waiting for a decision keep the pool provisional.
+    if request.pool_stale or counts.get("proposed") or not counts.get("approved"):
+        return "provisional"
+    pending = session.scalar(
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.job_type == "process_request",
+            Job.payload["request_id"].astext == str(request.id),
+            Job.status.in_(("queued", "leased", "running")),
+        )
+    )
+    # A queued or running rematch may still change the pool.
+    return "provisional" if pending else "confirmed"
 
 
 def shortlist_match(session: Session, request_id: UUID, match_id: UUID, actor: Actor, note: str | None = None) -> ShortlistCandidate:
     user = _recruiter(session, actor)
+    # One decision at a time per request: a double click or two tabs must not open two draft shortlists.
+    request = locked_request(session, request_id)
     match = _match(session, request_id, match_id)
+    if pool_status(session, request) != "confirmed":
+        raise HiringError("pool_provisional")
     if match.disposition not in {"recommended", "needs_review"}:
         raise HiringError("not_shortlistable")
     shortlist = session.scalar(
@@ -291,6 +503,15 @@ def shortlist_match(session: Session, request_id: UUID, match_id: UUID, actor: A
         )
     )
     if existing is not None:
+        if existing.review_state == "shortlisted":
+            return existing  # a repeated click
+        # Rejected earlier and restored since: shortlisting again is a new decision, recorded as one.
+        existing.review_state = "shortlisted"
+        existing.match_id = match.id
+        existing.added_by_user_id = user.id
+        existing.note = (note or "").strip() or existing.note
+        session.flush()
+        _audit_shortlist(session, actor, request_id, match, shortlist, existing)
         return existing
     row = ShortlistCandidate(
         shortlist_id=shortlist.id,
@@ -302,6 +523,11 @@ def shortlist_match(session: Session, request_id: UUID, match_id: UUID, actor: A
     )
     session.add(row)
     session.flush()
+    _audit_shortlist(session, actor, request_id, match, shortlist, row)
+    return row
+
+
+def _audit_shortlist(session, actor, request_id, match, shortlist, row) -> None:
     write_audit(
         session,
         actor=actor,
@@ -316,14 +542,47 @@ def shortlist_match(session: Session, request_id: UUID, match_id: UUID, actor: A
             "human_action": "shortlist",
         },
     )
-    return row
+
+
+def restore_match(session: Session, request_id: UUID, match_id: UUID, actor: Actor) -> CandidateMatch:
+    """Undo a recruiter's rejection. The candidate goes back to what the requirement verdicts say (eligible, needs
+    review or excluded); nothing is shortlisted by this. Rejecting by mistake is recoverable."""
+    _recruiter(session, actor)
+    locked_request(session, request_id)
+    match = _match(session, request_id, match_id)
+    if match.disposition != "rejected":
+        return match  # nothing to undo (or a repeated click)
+    pairs = session.execute(
+        select(RequestRequirement.strength, MatchRequirementResult.result)
+        .join(MatchRequirementResult, MatchRequirementResult.requirement_id == RequestRequirement.id)
+        .where(MatchRequirementResult.match_id == match.id)
+    ).all()
+    match.disposition = overall_disposition([(strength, result) for strength, result in pairs])
+    write_audit(
+        session,
+        actor=actor,
+        action="candidate_restored",
+        entity_type="candidate_match",
+        entity_id=match.id,
+        detail={
+            "request_id": str(request_id),
+            "candidate_id": str(match.candidate_id),
+            "match_id": str(match.id),
+            "human_action": "restore",
+            "disposition": match.disposition,
+        },
+    )
+    return match
 
 
 def reject_match(session: Session, request_id: UUID, match_id: UUID, actor: Actor) -> CandidateMatch:
     _recruiter(session, actor)
+    locked_request(session, request_id)
     match = _match(session, request_id, match_id)
     if match.disposition == "excluded":
         raise HiringError("already_excluded")
+    if match.disposition == "rejected":
+        return match  # a repeated click: already decided, nothing new to record
     match.disposition = "rejected"
     placed = session.scalars(
         select(ShortlistCandidate).where(ShortlistCandidate.match_id == match.id)
@@ -366,12 +625,21 @@ def request_view(session: Session, request_id: UUID) -> dict:
             CandidateMatch.disposition.in_(("recommended", "needs_review")),
         )
     )
+    # Candidates actually sent for THIS request. A candidate shared for another request does not count here.
     shared = session.scalar(
-        select(func.count())
-        .select_from(SharingRecord)
-        .join(ShortlistCandidate, ShortlistCandidate.candidate_id == SharingRecord.candidate_id)
-        .join(Shortlist, Shortlist.id == ShortlistCandidate.shortlist_id)
-        .where(Shortlist.request_id == request_id)
+        select(func.count(func.distinct(SharingRecord.candidate_id))).where(
+            SharingRecord.request_id == request_id,
+            SharingRecord.status == "sent",
+        )
+    )
+    from app.services.processing import processing_view
+
+    processing = processing_view(session, request_id)
+    latest_run = session.scalar(
+        select(AgentRun)
+        .where(AgentRun.request_id == request_id, AgentRun.agent_name == "requirement_extractor")
+        .order_by(AgentRun.created_at.desc())
+        .limit(1)
     )
     return {
         "id": str(row.id),
@@ -406,6 +674,24 @@ def request_view(session: Session, request_id: UUID) -> dict:
             }
             for item in requirements
         ],
+        "requirements_source": (
+            {
+                "model": latest_run.model,
+                "prompt_version": latest_run.prompt_version,
+                "fallback": latest_run.status == "fallback",
+                "fallback_reason": _fallback_reason(latest_run.output_ref),
+                "accepted": _parse_output_ref(latest_run.output_ref)[0],
+                "rejected": _parse_output_ref(latest_run.output_ref)[1],
+            }
+            if latest_run is not None
+            else None
+        ),
+        "processing": processing,
+        "pool_stale": row.pool_stale,
+        "pool_opened_at": row.pool_opened_at.isoformat() if row.pool_opened_at else None,
+        "last_match_completed_at": row.last_match_completed_at.isoformat() if row.last_match_completed_at else None,
+        "requested_count": row.requested_count,
+        "contact_email": row.contact_email,
     }
 
 
@@ -444,6 +730,20 @@ def _request(session: Session, request_id: UUID) -> HiringRequest:
     return row
 
 
+def locked_request(session: Session, request_id: UUID) -> HiringRequest:
+    """The request row, locked until this transaction ends, read fresh. Recruiter decisions on one request run one at
+    a time, so a retry sees what the first attempt committed instead of repeating it."""
+    row = session.scalar(
+        select(HiringRequest)
+        .where(HiringRequest.id == request_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise HiringError("not_found")
+    return row
+
+
 def _requirement(session: Session, request_id: UUID, requirement_id: UUID) -> RequestRequirement:
     row = session.get(RequestRequirement, requirement_id)
     if row is None or row.request_id != request_id:
@@ -456,6 +756,13 @@ def _match(session: Session, request_id: UUID, match_id: UUID) -> CandidateMatch
     if row is None or row.request_id != request_id:
         raise HiringError("not_found")
     return row
+
+
+def _actor_allowed(session: Session, actor: Actor) -> None:
+    """Human recruiters and the worker's system actor may run the automatic steps. Nothing else."""
+    if actor.kind == "system":
+        return
+    _recruiter(session, actor)
 
 
 def _recruiter(session: Session, actor: Actor) -> User:

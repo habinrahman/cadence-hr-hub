@@ -24,7 +24,11 @@ reports "already decided" and refreshes.
 - Every item carries the quote and page it came from. An item whose quote is not in the page text is dropped.
 - Filenames are never evidence. Dates come from the text; the upload date is shown separately and labelled as such.
 - Conflicting date evidence (labelled version date and latest mentioned date pointing at different CVs) is flagged.
-- The score is shown as "signal strength" under the signals it is built from, never as a model's confidence.
+- The score is a **same-person confidence** shown under the signals it is built from, never as a model's confidence.
+  Each agreeing signal removes a share of the remaining doubt (exact email 90%, exact phone 80%, name up to 50%,
+  content overlap up to 30%). A signal not available on both CVs is left out and lowers nothing; a different email
+  (keeps 50%) or phone (keeps 60%) is a contradiction and blocks a recommendation. Dates and content choose updated
+  against duplicate; they never lower the score. One action is recommended only at 98 or above.
 
 What each decision does (from the backend, and stated in the confirmation dialog):
 

@@ -162,6 +162,50 @@ def run_extract(
         _embed_chunks(chunks, embedder)
 
 
+def profile_document(session: Session, document: CandidateDocument, candidate: Candidate, actor, extractor=None) -> None:
+    """Add what a CV says to the profile of the person HR just attached it to.
+
+    A CV that waits for a relationship decision is read but not applied: nothing is written to a profile until a person
+    says whose CV it is. This runs once, as part of that decision. Facts an earlier CV already established are kept as
+    they are, and every new fact is stored only with a verified quote from this document."""
+    extractor = extractor if extractor is not None else get_extractor()
+    if extractor is None or document.status in {"quarantined", "needs_ocr", "failed", "archived"}:
+        return
+    page_rows = session.execute(
+        select(DocumentPage.original_text, DocumentPage.normalized_text)
+        .where(DocumentPage.document_id == document.id)
+        .order_by(DocumentPage.page_number)
+    ).all()
+    if not page_rows:
+        return
+    original_pages = [row.original_text for row in page_rows]
+    chunks = list(
+        session.scalars(
+            select(DocumentChunk).where(DocumentChunk.document_id == document.id).order_by(DocumentChunk.chunk_index)
+        ).all()
+    )
+    draft, run = _call_extractor(
+        session, None, document, "\n\n".join(row.normalized_text for row in page_rows), extractor
+    )
+    if not isinstance(draft, ExtractionDraft) or run is None:
+        return
+    assign_pages(draft, original_pages)
+    applied = apply_draft(
+        session,
+        candidate=candidate,
+        document_id=document.id,
+        pages=original_pages,
+        chunks=chunks,
+        draft=draft,
+        agent_run_id=run.id,
+    )
+    run.candidate_id = candidate.id
+    run.validation_result = _validation_label(applied.accepted, applied.rejected)
+    run.output_ref = _output_ref(applied.evidence_ids)
+    if applied.accepted and document.status == "extracted":
+        transition(document, "profiled", machine="candidate_document", actor=actor)
+
+
 def _can_embed(document) -> bool:
     if document.status in {"quarantined", "needs_ocr", "failed", "received", "extracting"}:
         return False
@@ -252,7 +296,7 @@ def _call_extractor(session, job, document, source_text: str, extractor: Structu
     if extractor is None:
         run = AgentRun(
             agent_name="candidate_extractor",
-            job_id=job.id,
+            job_id=job.id if job is not None else None,
             document_id=document.id,
             prompt_version=PROMPT_VERSION,
             input_hash=sha256_text(source_text),
@@ -271,7 +315,7 @@ def _call_extractor(session, job, document, source_text: str, extractor: Structu
         code = getattr(exc, "code", "extractor_unavailable")
         run = AgentRun(
             agent_name="candidate_extractor",
-            job_id=job.id,
+            job_id=job.id if job is not None else None,
             document_id=document.id,
             prompt_version=PROMPT_VERSION,
             input_hash=sha256_text(source_text),
@@ -288,7 +332,7 @@ def _call_extractor(session, job, document, source_text: str, extractor: Structu
         except DraftRejected:
             run = AgentRun(
                 agent_name="candidate_extractor",
-                job_id=job.id,
+                job_id=job.id if job is not None else None,
                 document_id=document.id,
                 prompt_version=PROMPT_VERSION,
                 input_hash=sha256_text(source_text),
@@ -301,7 +345,7 @@ def _call_extractor(session, job, document, source_text: str, extractor: Structu
             return None, run
     run = AgentRun(
         agent_name="candidate_extractor",
-        job_id=job.id,
+        job_id=job.id if job is not None else None,
         document_id=document.id,
         model=getattr(extractor, "model_name", None),
         prompt_version=PROMPT_VERSION,

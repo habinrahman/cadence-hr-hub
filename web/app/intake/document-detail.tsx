@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { getCandidate, type ActivityEvent, type CandidateProfile, type DocumentSummary, type Review } from "@/lib/api";
 import { ACTION_LABELS, DOCUMENT_STATUS } from "@/lib/labels";
+import { displayContacts } from "@/lib/contacts";
 import { shortDate } from "@/lib/format";
 import { AuditLine } from "@/components/domain/audit-line";
 import { RelationshipReview } from "@/components/domain/relationship-review";
@@ -117,7 +118,7 @@ function ExtractedProfile({ document }: { document: DocumentSummary }) {
   const [profile, setProfile] = useState<CandidateProfile | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
-  const contacts = profile?.contacts ?? document.extracted_contacts ?? [];
+  const contacts = displayContacts(profile?.contacts ?? document.extracted_contacts ?? []);
 
   async function show() {
     if (!document.candidate_id) return;

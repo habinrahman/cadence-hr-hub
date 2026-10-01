@@ -1,35 +1,40 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type CandidateMatch,
   type Dashboard,
   type HiringRequirement,
+  addHiringRequirement,
   approveHiringRequirements,
   editHiringRequirement,
-  extractHiringRequirements,
   getDashboard,
   getHiringRequest,
   getSharePreview,
   listHiringMatches,
-  openHiringRequest,
+  openPool,
+  rejectHiringRequirement,
   rejectMatch,
+  restoreMatch,
+  retryProcessing,
   runHiringMatch,
   shortlistMatch,
 } from "@/lib/api";
 import { ApiError } from "@/lib/errors";
 import { deriveLifecycle } from "@/lib/lifecycle";
-import { REQUEST_STATUS } from "@/lib/labels";
+import { PHASE, requestPhase } from "@/lib/request-phase";
 import { shortDate } from "@/lib/format";
 import { useAsync } from "@/lib/use-async";
-import { PageHeader, SectionLabel } from "@/components/ui/panel";
+import { PageHeader, RuleHeading } from "@/components/ui/panel";
 import { PanelSkeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/states";
+import { StatusText } from "@/components/ui/tag";
 import { Stepper } from "@/components/ui/stepper";
-import { Tag } from "@/components/ui/tag";
 import { useToast } from "@/components/ui/toast";
-import { Matches, type ShortlistState } from "./matches";
+import { type ShortlistState } from "./matches";
+import { Pool } from "./pool";
+import { ProcessingCard } from "./processing-card";
 import { RequestRecord } from "./record";
 import { Requirements } from "./requirements";
 import { SharePanel } from "./share-panel";
@@ -50,6 +55,12 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
 
   const detail = detailQ.data;
   const matches = useMemo(() => matchesQ.data?.matches ?? [], [matchesQ.data]);
+  // The pool is the candidates the matcher did not rule out. Excluded ones (an unmet mandatory requirement) and
+  // ones a recruiter rejected are not offered for shortlisting, so the pool size matches "N candidates matched".
+  const pool = useMemo(() => matches.filter((m) => ["recommended", "needs_review"].includes(m.disposition)), [matches]);
+  const excludedCount = matches.filter((m) => m.eligibility === "excluded").length;
+  const eligibleCount = pool.filter((m) => m.eligibility === "eligible").length;
+  const reviewCount = pool.filter((m) => m.eligibility === "needs_review").length;
 
   const [desk, setDesk] = useState<Dashboard | null>(null);
   const [deskDone, setDeskDone] = useState(false);
@@ -83,6 +94,20 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
       }
       return out;
     };
+
+    // The server says, per candidate, what was decided for this request. That is the truth; the dashboard lists and the
+    // per-candidate probe below are only for an API that does not send it.
+    if (matches.every((m) => m.shortlisted !== undefined)) {
+      const state: Record<string, ShortlistState> = {};
+      const approved: Record<string, boolean> = {};
+      for (const m of matches) {
+        state[m.candidate_id] = m.shortlisted ? "yes" : "no";
+        approved[m.candidate_id] = Boolean(m.shortlisted && (m.share_approved || m.shared));
+      }
+      setShortlist(state);
+      setShareApproved(approved);
+      return;
+    }
 
     if (desk && desk.counts.shortlisted_candidates <= desk.shortlisted_candidates.length) {
       const shortlisted = linked(desk.shortlisted_candidates);
@@ -144,57 +169,122 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
     }
   }
 
-  const onExtract = async () => {
-    if (await run(() => extractHiringRequirements(requestId), "Requirements proposed. Approve them before matching.")) {
-      detailQ.reload();
-    }
+  const onRetry = async () => {
+    if (await run(() => retryProcessing(requestId), "Processing restarted")) detailQ.reload();
   };
   const onEdit = async (
     item: HiringRequirement,
     patch: { text?: string; strength?: "mandatory" | "preferred"; label?: "skill" | "experience" | "education" | "certification" | "other" },
   ) => {
-    if (await run(() => editHiringRequirement(requestId, item.id, patch), "Edit saved. Approve the requirement again before it is used.")) {
+    if (await run(() => editHiringRequirement(requestId, item.id, patch), "Edit saved. The pool is provisional until you approve the requirements again.")) {
       detailQ.reload();
     }
   };
   const onApprove = async () => {
-    if (await run(() => approveHiringRequirements(requestId), "Requirements approved")) detailQ.reload();
+    if (await run(() => approveHiringRequirements(requestId), "Requirements approved. Re-matching on the approved requirements.")) detailQ.reload();
   };
-  const onRun = async () => {
-    const ok = await run(async () => {
-      await openHiringRequest(requestId);
-      await runHiringMatch(requestId);
-    }, "Matching finished. Nothing was shortlisted or shared.");
-    if (ok) {
+  const onRejectRequirement = async (item: HiringRequirement) => {
+    if (await run(() => rejectHiringRequirement(requestId, item.id), `"${item.text}" rejected. It is kept on record and not matched on.`)) {
+      detailQ.reload();
+    }
+  };
+  const onAdd = async (item: Parameters<typeof addHiringRequirement>[1]) => {
+    const ok = await run(() => addHiringRequirement(requestId, item), "Requirement added. Approve the requirements to re-run matching.");
+    if (ok) detailQ.reload();
+    return ok;
+  };
+  const onRerun = async () => {
+    if (await run(() => runHiringMatch(requestId), "Matching re-run. Nothing was shortlisted or shared.")) {
       setShortlist({});
       matchesQ.reload();
       detailQ.reload();
     }
   };
-  const onShortlist = async (match: CandidateMatch) => {
-    if (await run(() => shortlistMatch(requestId, match.id), "Added to the shortlist. Nothing was shared.")) {
-      setShortlist((current) => ({ ...current, [match.candidate_id]: "yes" }));
-      void refreshDesk();
+  const onShortlistSelected = async (matchIds: string[]) => {
+    let done = 0;
+    for (const id of matchIds) {
+      const match = matches.find((m) => m.id === id);
+      if (!match) continue;
+      const ok = await run(() => shortlistMatch(requestId, id));
+      if (ok) {
+        done += 1;
+        setShortlist((cur) => ({ ...cur, [match.candidate_id]: "yes" }));
+      }
     }
+    // run() already surfaces failures in the error banner; only toast what actually happened.
+    if (done === matchIds.length) {
+      notify("Shortlist updated. Nothing was shared.");
+    } else if (done > 0) {
+      notify(`Shortlisted ${done} of ${matchIds.length}. Nothing was shared.`);
+    }
+    // The cards are drawn from the server's per-candidate flags, so fetch them again. Without this the dashboard
+    // refresh below re-ran the card state from the flags loaded before the click and un-shortlisted the card.
+    if (done > 0) matchesQ.reload();
+    void refreshDesk();
   };
   const onReject = async (match: CandidateMatch) => {
-    if (await run(() => rejectMatch(requestId, match.id), "Rejection recorded")) matchesQ.reload();
+    if (await run(() => rejectMatch(requestId, match.id), "Rejection recorded. You can restore them from the Rejected filter.")) matchesQ.reload();
+  };
+  const onRestore = async (match: CandidateMatch) => {
+    if (await run(() => restoreMatch(requestId, match.id), "Restored to the pool. They are not shortlisted.")) matchesQ.reload();
   };
 
   const requirements = detail?.requirements ?? [];
-  const approvedCount = requirements.filter((r) => r.review_status === "approved").length;
   const probed = matches.filter((m) => ["recommended", "needs_review"].includes(m.disposition)).slice(0, PROBE_LIMIT);
   const anyUnknown = probed.some((m) => shortlist[m.candidate_id] === "unknown");
   const shortlistedCount = Object.entries(shortlist).filter(([, v]) => v === "yes").length;
   const approvedShares = Object.entries(shareApproved).filter(([id, v]) => v && shortlist[id] === "yes").length;
+  const reviewed = matches.filter((m) => m.disposition === "rejected").length + shortlistedCount;
 
   const steps = deriveLifecycle({
-    requirements,
-    matchCount: matches.length,
+    processing: detail?.processing.stage ?? "received",
+    poolStatus: detail?.processing.pool_status,
+    matchCount: detail?.processing.matched_count ?? 0,
+    reviewed,
     shortlisted: anyUnknown ? null : shortlistedCount,
     sharesApproved: approvedShares,
     shared: detail?.candidates_shared ?? 0,
   });
+
+  const stage = detail?.processing.stage;
+  // A provisional pool stays on screen while the approval rematch runs; it is never hidden from HR.
+  const poolStatus = detail?.processing.pool_status ?? "provisional";
+  const showPool = stage === "complete" || (stage === "matching" && matches.length > 0);
+  // Acknowledge each finished match once, not once per visit: the confirmed pool that arrives after HR approves,
+  // while this page stays open, is a new pool that HR is now looking at.
+  const poolAck = useRef<string | null>(null);
+  const matchedAt = detailQ.data?.last_match_completed_at ?? null;
+  useEffect(() => {
+    const key = `${requestId}:${matchedAt}`;
+    if (stage !== "complete" || poolAck.current === key) return;
+    poolAck.current = key;
+    void openPool(requestId)
+      .then(() => {
+        detailQ.reload();
+        return refreshDesk();
+      })
+      .catch(() => undefined);
+    // refreshDesk and detailQ are recreated each render; one acknowledgement per finished match is enough.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, requestId, matchedAt]);
+
+  useEffect(() => {
+    if (!stage || !["received", "extracting", "matching"].includes(stage)) return;
+    const id = setInterval(() => {
+      detailQ.reload();
+      matchesQ.reload();
+    }, 2000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
+  // When a rematch finishes, read the pool it produced (the last poll may predate it).
+  const lastStage = useRef(stage);
+  useEffect(() => {
+    if (lastStage.current === "matching" && stage === "complete") matchesQ.reload();
+    lastStage.current = stage;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
 
   if (detailQ.error) return <ErrorState error={detailQ.error} onRetry={detailQ.reload} />;
   if (!detail) {
@@ -205,9 +295,29 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
     );
   }
 
+  const phase = requestPhase(detail.processing.stage, detail);
   const owner =
     detail.owner_user_id && viewerId ? (detail.owner_user_id === viewerId ? "owner: you" : "owner: another recruiter") : null;
   const shareName = matches.find((m) => m.candidate_id === shareCandidate)?.candidate_name ?? null;
+
+  const requirementsSection = (
+    <section id="requirements" aria-labelledby="h-req">
+      <RuleHeading id="h-req">Requirements</RuleHeading>
+      <Requirements
+        requirements={requirements}
+        busy={busy}
+        poolStale={detail.pool_stale}
+        source={detail.requirements_source ?? null}
+        awaitingApproval={stage === "awaiting_approval"}
+        rematching={stage === "matching"}
+        onApprove={onApprove}
+        onReject={onRejectRequirement}
+        onAdd={onAdd}
+        onRerun={onRerun}
+        onEdit={onEdit}
+      />
+    </section>
+  );
 
   return (
     <>
@@ -217,22 +327,18 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
         </Link>
       </p>
       <PageHeader
-        hue="req"
+        eyebrow="Hiring request"
         title={detail.job_title}
         sub={
           <>
-            <span className="font-semibold text-ink">{detail.company}</span> · received {shortDate(detail.received_at)}
+            Received from <strong className="font-semibold text-ink">{detail.company}</strong> · {shortDate(detail.received_at)}
             {owner ? ` · ${owner}` : ""}
           </>
         }
-        actions={<Tag tone={detail.status === "open" ? "decided" : "neutral"}>{REQUEST_STATUS[detail.status] ?? detail.status}</Tag>}
+        actions={phase ? <StatusText tone={PHASE[phase].tone}>{PHASE[phase].label}</StatusText> : null}
       />
 
       <Stepper steps={steps} />
-      <p className="mt-1.5 text-xs text-mut">
-        Progress is worked out from requirement approvals, matches, the shortlist and share records. The request&apos;s stored status only
-        says draft or open.
-      </p>
 
       {actionError ? (
         <div className="mt-4">
@@ -242,29 +348,57 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
 
       <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="space-y-8">
-          <section aria-labelledby="h-req">
-            <SectionLabel id="h-req">2 · Requirements</SectionLabel>
-            <Requirements requirements={requirements} busy={busy} onExtract={onExtract} onApprove={onApprove} onEdit={onEdit} />
-          </section>
+          <ProcessingCard
+            processing={detail.processing}
+            status={detail.status}
+            phase={phase}
+            shortlisted={matchesQ.data ? (anyUnknown ? null : shortlistedCount) : undefined}
+            shared={detail.candidates_shared}
+            onRetry={onRetry}
+          />
 
-          <section aria-labelledby="h-match">
-            <SectionLabel id="h-match">3 · Candidates against approved requirements</SectionLabel>
-            {matchesQ.error ? (
-              <ErrorState error={matchesQ.error} onRetry={matchesQ.reload} />
-            ) : (
-              <Matches
-                matches={matches}
-                shortlist={shortlist}
-                busy={busy}
-                approvedCount={approvedCount}
-                jobTitle={detail.job_title}
-                onRun={onRun}
-                onShortlist={onShortlist}
-                onReject={onReject}
-                onShare={(m) => setShareCandidate(m.candidate_id)}
-              />
-            )}
-          </section>
+          {/* While the pool is provisional, approving the requirements is the next step, so they come first. */}
+          {poolStatus !== "confirmed" ? requirementsSection : null}
+
+          {showPool ? (
+            <section id="pool" aria-labelledby="h-pool">
+              <RuleHeading id="h-pool">Candidate pool</RuleHeading>
+              <p className="mb-3 text-sm" aria-busy={matchesQ.data ? undefined : true}>
+                {matchesQ.data
+                  ? poolStatus === "confirmed"
+                    ? `Shortlisted: ${shortlistedCount} of ${pool.length}`
+                    : `${pool.length} candidate${pool.length === 1 ? "" : "s"} in the provisional pool`
+                  : "Loading matched candidates…"}
+                {matchesQ.data ? (
+                  <span className="ml-3 text-mut">
+                    Eligible: {eligibleCount} · Needs review: {reviewCount} · Excluded: {excludedCount}
+                    {excludedCount > 0 ? " (a mandatory requirement not met — use the Excluded filter to check them)" : ""}
+                  </span>
+                ) : null}
+              </p>
+              {matchesQ.error ? (
+                <ErrorState error={matchesQ.error} onRetry={matchesQ.reload} />
+              ) : !matchesQ.data ? (
+                <PanelSkeleton rows={3} />
+              ) : (
+                <Pool
+                  matches={matches}
+                  shortlist={shortlist}
+                  shareApproved={shareApproved}
+                  busy={busy}
+                  jobTitle={detail.job_title}
+                  poolStatus={poolStatus}
+                  rematching={stage === "matching"}
+                  onShortlistSelected={onShortlistSelected}
+                  onReject={onReject}
+                  onShare={(m) => setShareCandidate(m.candidate_id)}
+                  onRestore={onRestore}
+                />
+              )}
+            </section>
+          ) : null}
+
+          {poolStatus === "confirmed" ? requirementsSection : null}
         </div>
 
         <aside aria-label="Request record">
@@ -280,6 +414,7 @@ export function Workspace({ requestId, initialCandidate }: { requestId: string; 
         onChanged={() => {
           if (shareCandidate) setShareApproved((current) => ({ ...current, [shareCandidate]: true }));
           detailQ.reload();
+          matchesQ.reload(); // the per-candidate flags (approved, shared) come from the server
           void refreshDesk();
         }}
       />

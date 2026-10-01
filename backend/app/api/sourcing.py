@@ -12,7 +12,7 @@ from app.api.deps import Auth, get_session, require_recruiter
 from app.config import get_settings
 from app.domain.transitions import TransitionError
 from app.models import AuditEvent, CandidateSource, DuplicateReview
-from app.services.sourcing import SourceError, submit_source
+from app.services.sourcing import PossibleExisting, SourceError, submit_lead, submit_source
 
 router = APIRouter()
 
@@ -25,12 +25,38 @@ def post_sourced_candidate(
     source_type: str = Form(""),
     source_reference: str = Form(""),
     notes: str = Form(""),
+    attach_to: UUID | None = Form(None),
+    create_new: bool = Form(False),
     file: UploadFile | None = File(default=None),
     auth: Auth = Depends(require_recruiter),
     session: Session = Depends(get_session),
 ) -> dict:
     if file is None:
-        raise HTTPException(status_code=422, detail="missing_cv")
+        # No CV yet: record the person and where they were found. A CV sent later goes through intake.
+        try:
+            row = submit_lead(
+                session,
+                actor=auth.actor,
+                display_name=name,
+                email=email,
+                phone=phone,
+                source_type=source_type,
+                source_reference=source_reference,
+                notes=notes,
+                attach_to=attach_to,
+                create_new=create_new,
+            )
+            session.commit()
+        except TransitionError as exc:
+            session.rollback()
+            raise HTTPException(status_code=403, detail=exc.code) from None
+        except PossibleExisting as exc:
+            session.rollback()
+            raise HTTPException(status_code=409, detail={"code": exc.code, "matches": exc.matches}) from None
+        except SourceError as exc:
+            session.rollback()
+            raise HTTPException(status_code=409 if exc.code == "not_a_match" else 422, detail=exc.code) from None
+        return _payload(session, row)
     data = file.file.read(get_settings().max_upload_bytes + 1)
     if len(data) > get_settings().max_upload_bytes:
         raise HTTPException(status_code=413, detail="file_too_large")
@@ -74,22 +100,27 @@ def get_sourced_candidate(
 def _payload(session: Session, row: CandidateSource) -> dict:
     from app.models import CandidateDocument
 
-    document = session.get(CandidateDocument, row.document_id)
-    review = session.scalar(
-        select(DuplicateReview)
-        .where(DuplicateReview.document_id == row.document_id)
-        .order_by(DuplicateReview.created_at.desc())
+    document = session.get(CandidateDocument, row.document_id) if row.document_id else None
+    review = (
+        session.scalar(
+            select(DuplicateReview)
+            .where(DuplicateReview.document_id == row.document_id)
+            .order_by(DuplicateReview.created_at.desc())
+        )
+        if row.document_id
+        else None
     )
     events = session.scalars(
         select(AuditEvent)
         .where(
-            AuditEvent.entity_id == row.document_id,
+            AuditEvent.entity_id == (row.document_id or row.candidate_id),
             AuditEvent.action.in_(
                 (
                     "sourced_cv_attached",
                     "sourced_duplicate_detected",
                     "sourced_candidate_created",
                     "sourced_review_decided",
+                    "sourced_candidate_attached",
                 )
             ),
         )
@@ -103,7 +134,7 @@ def _payload(session: Session, row: CandidateSource) -> dict:
         "source_type": row.source_type,
         "source_reference": row.source_reference,
         "notes": row.notes,
-        "document_id": str(row.document_id),
+        "document_id": str(row.document_id) if row.document_id else None,
         "document_status": document.status if document else None,
         "identity_outcome": document.identity_outcome if document else None,
         "candidate_id": str(row.candidate_id) if row.candidate_id else None,

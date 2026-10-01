@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.confidence import PairEvidence
 from app.domain.cvdates import dates_in_text, explicit_dates, is_newer
-from app.domain.identity import name_overlap, name_similarity
+from app.domain.identity import name_overlap, name_similarity, national_phone, phones_match
 from app.extraction.contacts import normalize_email, normalize_phone
 from app.extraction.draft import ExtractionDraft, quote_in_source
 from app.models import (
@@ -50,7 +50,7 @@ def contact_pairs(
             PairEvidence(
                 candidate_id=candidate_id,
                 email_match=_match(incoming_emails, stored_emails),
-                phone_match=_match(incoming_phones, stored_phones),
+                phone_match=phone_match(incoming_phones, stored_phones),
                 name_similarity=name_similarity(name, candidate.display_name),
                 document_hash_match=False,
             )
@@ -103,7 +103,7 @@ def build_pairs(
             PairEvidence(
                 candidate_id=candidate_id,
                 email_match=_match(incoming_emails, stored_emails),
-                phone_match=_match(incoming_phones, stored_phones),
+                phone_match=phone_match(incoming_phones, stored_phones),
                 name_similarity=name_similarity(name, candidate.display_name),
                 document_hash_match=_same_hash(session, candidate_id, document.sha256),
                 incoming_is_newer=is_newer(incoming_dates, stored_dates),
@@ -120,6 +120,8 @@ def build_pairs(
 def _ids_for(session: Session, kind: str, values: set[str]) -> set[UUID]:
     if not values:
         return set()
+    if kind == "phone":
+        return _phone_ids(session, values)
     rows = session.scalars(
         select(CandidateContact.candidate_id).where(
             CandidateContact.kind == kind,
@@ -196,6 +198,31 @@ def _match(incoming: set[str], stored: set[str]) -> bool | None:
     if not incoming or not stored:
         return None
     return bool(incoming & stored)
+
+
+def phone_match(incoming: set[str], stored: set[str]) -> bool | None:
+    """Like _match, but 052 444 9121 and +972 52 444 9121 are one number, not a contradiction."""
+    if not incoming or not stored:
+        return None
+    return any(phones_match(left, right) for left in incoming for right in stored)
+
+
+def _phone_ids(session: Session, values: set[str]) -> set[UUID]:
+    """Candidates holding any of these numbers, in any of the ways phones_match accepts."""
+    found: set[UUID] = set()
+    for value in values:
+        national = national_phone(value)
+        if len(national) < 8:
+            continue
+        stored = func.ltrim(CandidateContact.value_normalized, "0")
+        rows = session.execute(
+            select(CandidateContact.candidate_id, CandidateContact.value_normalized).where(
+                CandidateContact.kind == "phone",
+                or_(stored.like("%" + national), literal(national).like(func.concat("%", stored))),
+            )
+        )
+        found.update(candidate_id for candidate_id, other in rows if phones_match(value, other))
+    return found
 
 
 def _roles(draft: ExtractionDraft | None, pages: list[str]) -> set[str]:

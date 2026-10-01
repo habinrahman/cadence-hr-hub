@@ -20,7 +20,7 @@ Production is a configuration boundary, not a new identity provider. Set `ENVIRO
 
 ## Audit
 
-`audit_events` accepts inserts. A database trigger rejects `UPDATE` and `DELETE`. Audit payloads stay limited to ids and codes. The table owner can still truncate the table or drop the trigger; the application role is that owner.
+`audit_events` accepts inserts. A database trigger rejects `UPDATE` and `DELETE`. Audit payloads stay limited to ids and codes. The same trigger rejects `TRUNCATE`. The application database role is a superuser, so an operator can still disable the trigger; the table is append-only for the application, not against the database owner.
 
 ## Backup
 

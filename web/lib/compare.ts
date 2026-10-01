@@ -10,9 +10,9 @@ export function isDecided(status: string): boolean {
 /** How each comparison result is worded. "Unknown" is never shown as a difference, and nothing is called removed. */
 export const ITEM_STATUS: Record<CompareItemStatus, { label: string; tone: Tone; mark: string }> = {
   same: { label: "Same", tone: "neutral", mark: "=" },
-  added: { label: "Added in incoming CV", tone: "ok", mark: "+" },
+  added: { label: "Added in new CV", tone: "ok", mark: "+" },
   changed: { label: "Changed", tone: "warn", mark: "~" },
-  only_existing: { label: "Not found in incoming CV", tone: "warn", mark: "?" },
+  only_existing: { label: "Not found in new CV", tone: "warn", mark: "?" },
   unknown: { label: "Not compared", tone: "unknown", mark: "·" },
 };
 
@@ -20,7 +20,7 @@ const pct = (value: number | null) => (value === null ? "" : `${Math.round(value
 
 /**
  * One backend signal in plain words. The state meanings come from the scoring code:
- * cv_dates "matched" means the incoming CV mentions later dates than what is stored,
+ * cv_dates "matched" means the new CV mentions later dates than what is stored,
  * and the similarity signals are token overlap, not a meaning model.
  */
 export type SignalContext = {
@@ -41,38 +41,40 @@ export function describeSignal(
   if (item.code === "phone" && item.state === "matched" && context.sharedPhone === false) {
     return unknown("Phone signal matched, but the two CVs show no phone number in common. It may come from date-like digits, so do not rely on it");
   }
+  // Missing is worded as not compared. It does not count against the two CVs being one person.
   switch (item.code) {
     case "email":
     case "phone": {
       const noun = item.code === "email" ? "email address" : "phone number";
-      if (item.state === "matched") return { text: `Same ${noun}`, kind: "match" };
-      if (item.state === "unmatched") return { text: `Different ${noun}`, kind: "mismatch" };
-      return unknown(`${item.code === "email" ? "Email" : "Phone"} not available on both CVs`);
+      if (item.state === "matched") return { text: `Same ${noun} — strong identity evidence`, kind: "match" };
+      if (item.state === "unmatched") return { text: `Different ${noun} — evidence against the same person`, kind: "mismatch" };
+      return unknown(`${item.code === "email" ? "Email" : "Phone"} — not available on both CVs`);
     }
     case "name":
-      return item.state === "recorded" ? { text: `Name similarity ${pct(value)}`, kind: "info" } : unknown("Name not available on both CVs");
+      return item.state === "recorded" ? { text: `Name similarity ${pct(value)}`, kind: "info" } : unknown("Name — not available on both CVs");
     case "document_hash":
       return item.state === "matched"
         ? { text: "Identical file", kind: "match" }
         : { text: "Not a byte-identical file", kind: "info" };
+    // Dates say whether the CV is an update or a duplicate. They say nothing about who the person is.
     case "cv_dates":
-      if (item.state === "matched") return { text: "Incoming CV mentions later dates", kind: "match" };
-      if (item.state === "unmatched") return { text: "Incoming CV does not mention later dates", kind: "mismatch" };
-      return unknown("Dates not available to compare");
+      if (item.state === "matched") return { text: "New CV mentions later dates", kind: "match" };
+      if (item.state === "unmatched") return { text: "New CV does not mention later dates", kind: "info" };
+      return unknown("Dates — not available");
     case "explicit_version":
-      if (item.state === "matched") return { text: "Incoming CV's own version date is later", kind: "match" };
-      if (item.state === "unmatched") return { text: "Incoming CV's own version date is not later", kind: "mismatch" };
-      return unknown("No version date labelled on both CVs");
+      if (item.state === "matched") return { text: "New CV's own version date is later", kind: "match" };
+      if (item.state === "unmatched") return { text: "New CV's own version date is not later", kind: "info" };
+      return unknown("Version date — not available");
     case "employment":
-      return item.state === "recorded" ? { text: `Employment overlap ${pct(value)}`, kind: "info" } : unknown("Employment not available on both CVs");
+      return item.state === "recorded" ? { text: `Employment overlap ${pct(value)}`, kind: "info" } : unknown("Employment — not compared");
     case "education":
-      return item.state === "recorded" ? { text: `Education overlap ${pct(value)}`, kind: "info" } : unknown("Education not available on both CVs");
+      return item.state === "recorded" ? { text: `Education overlap ${pct(value)}`, kind: "info" } : unknown("Education — not compared");
     case "skills":
-      return item.state === "recorded" ? { text: `Skills overlap ${pct(value)}`, kind: "info" } : unknown("Skills not available on both CVs");
+      return item.state === "recorded" ? { text: `Skills overlap ${pct(value)}`, kind: "info" } : unknown("Skills — not compared");
     case "semantic":
       return item.state === "recorded"
         ? { text: `Word overlap ${pct(value)} (not a meaning model)`, kind: "info" }
-        : unknown("Word overlap not available");
+        : unknown("Word overlap — not available");
     default:
       return unknown(`${item.code.replaceAll("_", " ")}: ${item.state}`);
   }
@@ -102,12 +104,21 @@ export function recommendation(review: {
   recommended_action: string | null;
   confidence: number | null;
   ambiguous: boolean;
+  evidence?: EvidenceItem[];
 }): { headline: string; action: string | null; basis: string } {
   if (review.ambiguous) {
     return {
       headline: "This CV may belong to more than one existing profile",
       action: null,
       basis: "More than one existing profile looks related, so no action is proposed.",
+    };
+  }
+  const conflict = contactConflict(review.evidence ?? []);
+  if (conflict && !review.recommended_action) {
+    return {
+      headline: "Conflicting contact details — your decision",
+      action: null,
+      basis: `Both CVs show the same ${conflict.same}, but a different ${conflict.different}. People change contact details, so this may still be the same person. No action is proposed.`,
     };
   }
   const headline: Record<string, string> = {
@@ -123,48 +134,77 @@ export function recommendation(review: {
       basis: "Above the high-confidence setting configured for Cadence.",
     };
   }
+  if (review.likely_relationship === "different_candidate") {
+    return { headline: "Possible different person", action: null, basis: "Not enough evidence that this is the same person, so no action is proposed." };
+  }
   return {
-    headline: label ? `${label}, but not certain` : "No relationship proposed",
+    headline: label ? "Possible relationship — review required" : "No relationship proposed",
     action: null,
     basis: "Below the high-confidence setting, so no action is proposed.",
   };
 }
 
+/** One contact detail in common and the other different: the backend never calls that pair a different person. */
+function contactConflict(evidence: EvidenceItem[]): { same: string; different: string } | null {
+  const state = (code: string) => evidence.find((item) => item.code === code)?.state;
+  const noun = { email: "email address", phone: "phone number" } as const;
+  for (const [same, different] of [["phone", "email"], ["email", "phone"]] as const) {
+    if (state(same) === "matched" && state(different) === "unmatched") return { same: noun[same], different: noun[different] };
+  }
+  return null;
+}
+
 export type DecisionCopy = { label: string; title: string; body: string; confirmLabel: string; tone: "primary" | "danger" };
 
-/** What each existing backend action actually does, taken from how the backend applies it. */
-export function decisionCopy(action: string): DecisionCopy {
+/**
+ * What each backend action actually does, in the words on the button. `hasDocument` is false for an Excel row, which
+ * has no uploaded CV: there the duplicate outcome only records another application and deletes nothing.
+ */
+export function decisionCopy(action: string, hasDocument = true): DecisionCopy {
   switch (action) {
     case "accept_update":
       return {
-        label: "Accept as updated CV",
-        title: "Accept this update?",
-        body: "The incoming CV becomes the candidate's current CV. The previous CV stays in the candidate's history and can still be opened.",
-        confirmLabel: "Accept update",
+        label: "Merge & Update Profile",
+        title: "Merge this CV into the existing profile?",
+        body: hasDocument
+          ? "The new CV is attached to the existing candidate and becomes their current CV. The previous CV stays in the candidate's history and can still be opened. Applications and relationships are kept."
+          : "The row's missing details are added to the existing candidate. Nothing already on the profile is replaced.",
+        confirmLabel: "Yes, merge and update",
         tone: "primary",
       };
     case "record_duplicate":
-      return {
-        label: "Record as duplicate",
-        title: "Record this as a duplicate?",
-        body: "The incoming CV is linked to this candidate as another application but does not become the current CV. The existing CV stays current.",
-        confirmLabel: "Record duplicate",
-        tone: "primary",
-      };
+      return hasDocument
+        ? {
+            label: "Delete Duplicate",
+            title: "Delete this duplicate CV?",
+            body: "Only this duplicate upload is deleted. It is archived and hidden from search, and the archived record is kept under the retention policy. The candidate and their current CV are not changed.",
+            confirmLabel: "Yes, delete duplicate",
+            tone: "danger",
+          }
+        : {
+            label: "Record as duplicate",
+            title: "Record this as a duplicate?",
+            body: "The row is recorded as another application for this candidate. The candidate's profile is not changed.",
+            confirmLabel: "Record duplicate",
+            tone: "primary",
+          };
     case "create_separate_candidate":
       return {
-        label: "It's a different person",
-        title: "Save as a different candidate?",
-        body: "A new candidate is created from the incoming CV. The existing candidate is not changed.",
-        confirmLabel: "Create separate candidate",
-        tone: "danger",
+        label: "Create New Candidate",
+        title: "Create a new candidate?",
+        body: "A new candidate profile is created and the CV stays linked to it. The existing candidate is not changed.",
+        confirmLabel: "Yes, create new candidate",
+        tone: "primary",
       };
     default:
       return { label: action, title: "Confirm this decision?", body: "This decision is recorded.", confirmLabel: "Confirm", tone: "primary" };
   }
 }
 
-export function documentStateMessage(state: string, side: "existing" | "incoming"): string | null {
+const SIDE_NAME = { existing: "previous", incoming: "new" } as const;
+
+export function documentStateMessage(state: string, sideKey: "existing" | "incoming"): string | null {
+  const side = SIDE_NAME[sideKey];
   switch (state) {
     case "ok":
       return null;

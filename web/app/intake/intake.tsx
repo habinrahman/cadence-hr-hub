@@ -135,8 +135,7 @@ export function Intake() {
   return (
     <>
       <PageHeader
-        hue="rel"
-        title="CV intake"
+title="CV intake"
         sub="Upload a CV. Cadence reads it and, if it overlaps an existing profile, proposes a relationship. A recruiter confirms before any record changes."
       />
 

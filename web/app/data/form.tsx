@@ -84,8 +84,7 @@ export function DataDesk() {
   return (
     <>
       <PageHeader
-        hue="rel"
-        title="Excel import and export"
+title="Excel import and export"
         sub="Import a candidate list, or download hiring activity for a date range. Cell text is not shown back here."
       />
 

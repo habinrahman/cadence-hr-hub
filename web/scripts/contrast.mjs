@@ -28,7 +28,9 @@ const pairs = [
   ["bad-ink", "panel", 4.5], ["bad-ink", "bad-bg", 4.5],
   ["ev-ink", "panel", 4.5],
   ["white", "human", 4.5], ["white", "ok-ink", 4.5], ["white", "bad-ink", 4.5],
-  ["nav-ink", "nav", 4.5], ["white", "nav", 4.5],
+  ["nav-ink", "nav", 4.5], ["white", "nav", 4.5], ["nav-mut", "nav", 4.5], ["nav-ink", "nav-active", 4.5], ["white", "nav-active", 4.5],
+  ["t-rel-ink", "t-rel-bg", 4.5], ["t-req-ink", "t-req-bg", 4.5], ["t-match-ink", "t-match-bg", 4.5], ["t-share-ink", "t-share-bg", 4.5],
+  ["human-ink", "inset", 4.5], ["mut", "canvas", 4.5],
   ["t-rel-ink", "panel", 4.5], ["t-req-ink", "panel", 4.5], ["t-match-ink", "panel", 4.5], ["t-share-ink", "panel", 4.5],
   // UI edges (3:1)
   ["rule-strong", "panel", 3], ["human", "canvas", 3], ["prop", "panel", 3],

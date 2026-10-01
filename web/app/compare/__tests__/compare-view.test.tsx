@@ -97,7 +97,7 @@ const comparison = (over: Partial<Comparison> = {}): Comparison => ({
       comparable: false,
       existing_state: "extracted",
       incoming_state: "not_extracted",
-      note: "Nothing was extracted from the incoming CV for this section, so it cannot be compared. That does not mean the information is absent.",
+      note: "Nothing was extracted from the new CV for this section, so it cannot be compared. That does not mean the information is absent.",
       items: [{ status: "unknown", label: "Python", existing: value("Python"), incoming: null }],
     },
   ],
@@ -137,14 +137,14 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-const loaded = () => screen.findByRole("heading", { name: "CV relationship review" });
+const loaded = () => screen.findByRole("heading", { name: "Previous CV vs new CV" });
 
 describe("comparison workspace", () => {
-  it("names the existing and incoming CVs and their files", async () => {
+  it("names the existing and new CVs and their files", async () => {
     setup();
     await loaded();
-    const existing = screen.getByRole("region", { name: "Existing CV" });
-    const incoming = screen.getByRole("region", { name: "Incoming CV" });
+    const existing = screen.getByRole("region", { name: "Previous CV" });
+    const incoming = screen.getByRole("region", { name: "New CV" });
     expect(within(existing).getByText("resume_2025.pdf")).toBeTruthy();
     expect(within(incoming).getByText("resume_2026.pdf")).toBeTruthy();
     expect(within(existing).getByText("Current on file")).toBeTruthy();
@@ -172,11 +172,14 @@ describe("comparison workspace", () => {
     setup();
     await loaded();
     const why = screen.getByRole("region", { name: /Why Cadence thinks/ });
-    expect(within(why).getByText("Same email address")).toBeTruthy();
-    expect(within(why).getByText("Same phone number")).toBeTruthy();
+    expect(within(why).getByText("Same email address — strong identity evidence")).toBeTruthy();
+    expect(within(why).getByText("Same phone number — strong identity evidence")).toBeTruthy();
     expect(within(why).getByText("Name similarity 100%")).toBeTruthy();
-    expect(within(why).getByText(/No version date labelled/)).toBeTruthy();
+    expect(within(why).getByText("Version date — not available")).toBeTruthy();
     expect(within(why).getByText(/not a model.s confidence/i)).toBeTruthy();
+    // A missing signal shows no weight: it is left out of the score, not counted against it.
+    expect(within(why).getByText("Version date — not available").closest("li")?.textContent).not.toMatch(/weight/);
+    expect(within(why).getByText(/do not lower it/)).toBeTruthy();
   });
 
   it("labels added, changed, not-found and same items, and never says removed", async () => {
@@ -186,9 +189,9 @@ describe("comparison workspace", () => {
     // Each status appears as a tag, so look for the tag by its exact label.
     const tags = within(experience).getAllByText((_, node) => node?.tagName === "SPAN" && node.className.includes("uppercase"));
     const labels = tags.map((tag) => tag.textContent?.replace(/^[+~?=·]\s*/, "").trim());
-    expect(labels).toEqual(expect.arrayContaining(["Added in incoming CV", "Changed", "Not found in incoming CV", "Same"]));
+    expect(labels).toEqual(expect.arrayContaining(["Added in new CV", "Changed", "Not found in new CV", "Same"]));
     // The empty cell on the incoming side says the same thing in plain text.
-    expect(within(experience).getAllByText("Not found in incoming CV").length).toBeGreaterThan(0);
+    expect(within(experience).getAllByText("Not found in new CV").length).toBeGreaterThan(0);
     expect(document.body.textContent?.toLowerCase()).not.toContain("removed");
   });
 
@@ -208,11 +211,13 @@ describe("comparison workspace", () => {
     setup();
     await loaded();
     expect(mocked.getDocumentPages).not.toHaveBeenCalled();
+    // A PDF opens on its page view. This test is about the text view.
+    await user.click(within(screen.getByRole("group", { name: "New CV view" })).getByRole("button", { name: "Text" }));
     const experience = screen.getByRole("region", { name: "Experience" });
     await user.click(within(experience).getAllByText(/Source · page 1/)[0]);
-    await user.click(within(experience).getAllByRole("button", { name: /Show in the incoming CV text/ })[0]);
+    await user.click(within(experience).getAllByRole("button", { name: /Show in the new CV/ })[0]);
     await waitFor(() => expect(mocked.getDocumentPages).toHaveBeenCalledWith("d-new"));
-    const text = await screen.findByLabelText("Incoming CV, page 1");
+    const text = await screen.findByLabelText("New CV, page 1");
     expect(text.textContent).toContain("Google, Senior Engineer");
     expect(mocked.getDocumentPages).toHaveBeenCalledTimes(1);
   });
@@ -222,8 +227,9 @@ describe("comparison workspace", () => {
     const user = userEvent.setup();
     setup();
     await loaded();
-    await user.click(within(screen.getByRole("region", { name: "Incoming CV text" })).getByRole("button", { name: "Open CV text" }));
-    const text = await screen.findByLabelText("Incoming CV, page 1");
+    await user.click(within(screen.getByRole("group", { name: "New CV view" })).getByRole("button", { name: "Text" }));
+    await user.click(within(screen.getByRole("region", { name: "New CV text" })).getByRole("button", { name: "Open CV text" }));
+    const text = await screen.findByLabelText("New CV, page 1");
     expect(within(text).getByText(/Only in this CV:/)).toBeTruthy();
   });
 });
@@ -233,9 +239,9 @@ describe("making a decision", () => {
     const user = userEvent.setup();
     setup();
     await loaded();
-    await user.click(screen.getByRole("button", { name: "Accept as updated CV" }));
-    const dialog = await screen.findByRole("dialog", { name: "Accept this update?" });
-    expect(within(dialog).getByText(/becomes the candidate's current CV/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Merge & Update Profile" }));
+    const dialog = await screen.findByRole("dialog", { name: "Merge this CV into the existing profile?" });
+    expect(within(dialog).getByText(/becomes their current CV/)).toBeTruthy();
     expect(within(dialog).getByText(/stays in the candidate's history/)).toBeTruthy();
     expect(mocked.decideReview).not.toHaveBeenCalled();
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -255,10 +261,10 @@ describe("making a decision", () => {
         { action: "duplicate_review_decided", actor_kind: "user", created_at: "2026-09-30T06:00:00Z", detail: { human_action: "accept_update" } },
       ],
     });
-    await user.click(screen.getByRole("button", { name: "Accept as updated CV" }));
+    await user.click(screen.getByRole("button", { name: "Merge & Update Profile" }));
     const dialog = await screen.findByRole("dialog");
-    await user.dblClick(within(dialog).getByRole("button", { name: "Accept update" }));
-    await waitFor(() => expect(screen.getByText("Decision recorded: Accept as updated CV.")).toBeTruthy());
+    await user.dblClick(within(dialog).getByRole("button", { name: "Yes, merge and update" }));
+    await waitFor(() => expect(screen.getByText("Decision recorded: Merge & Update Profile.")).toBeTruthy());
     expect(mocked.decideReview).toHaveBeenCalledTimes(1);
     expect(mocked.decideReview).toHaveBeenCalledWith("r1", "accept_update", undefined);
     const decision = screen.getByRole("region", { name: /Your decision/ });
@@ -275,8 +281,8 @@ describe("making a decision", () => {
     mocked.getReviewRecord.mockResolvedValue(review({ status: "recorded_duplicate" }));
     mocked.getReviewComparison.mockResolvedValue(comparison({ status: "recorded_duplicate", warnings: ["review_decided"] }));
     const before = mocked.getReviewComparison.mock.calls.length;
-    await user.click(screen.getByRole("button", { name: "Accept as updated CV" }));
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Accept update" }));
+    await user.click(screen.getByRole("button", { name: "Merge & Update Profile" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Yes, merge and update" }));
     await waitFor(() => expect(screen.getByText(/This review has already been decided/)).toBeTruthy());
     expect(screen.queryByText(/Decision recorded/)).toBeNull();
     expect(mocked.getReviewComparison.mock.calls.length).toBeGreaterThan(before);
@@ -288,8 +294,8 @@ describe("making a decision", () => {
     setup();
     await loaded();
     mocked.decideReview.mockRejectedValue(new TypeError("Failed to fetch"));
-    await user.click(screen.getByRole("button", { name: "Record as duplicate" }));
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Record duplicate" }));
+    await user.click(screen.getByRole("button", { name: "Delete Duplicate" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Yes, delete duplicate" }));
     await waitFor(() => expect(screen.getByText("Cannot reach the server")).toBeTruthy());
     expect(screen.queryByText(/Decision recorded/)).toBeNull();
     expect(within(screen.getByRole("region", { name: /Your decision/ })).getAllByRole("button").length).toBe(3);
@@ -299,11 +305,11 @@ describe("making a decision", () => {
     const user = userEvent.setup();
     setup();
     await loaded();
-    const first = screen.getByRole("button", { name: "Accept as updated CV" });
+    const first = screen.getByRole("button", { name: "Merge & Update Profile" });
     first.focus();
     expect(document.activeElement).toBe(first);
     await user.keyboard("{Enter}");
-    expect(await screen.findByRole("dialog", { name: "Accept this update?" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "Merge this CV into the existing profile?" })).toBeTruthy();
   });
 });
 
@@ -323,9 +329,9 @@ describe("states the backend can be in", () => {
       }),
     });
     await loaded();
-    expect((screen.getByRole("button", { name: "Accept as updated CV" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Record as duplicate" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "It's a different person" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Merge & Update Profile" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Delete Duplicate" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Create New Candidate" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("says when the comparison is unavailable instead of inventing one", async () => {
@@ -346,7 +352,7 @@ describe("states the backend can be in", () => {
     expect(screen.queryByRole("region", { name: /Your decision/ })).toBeNull();
   });
 
-  it("explains an incoming scan with no readable text and does not compare its fields", async () => {
+  it("explains a new scan with no readable text and does not compare its fields", async () => {
     setup({
       comparison: comparison({
         incoming: { state: "needs_ocr", document: doc("d-new", "scan.pdf", { status: "needs_ocr" }) },
@@ -354,7 +360,7 @@ describe("states the backend can be in", () => {
       }),
     });
     await loaded();
-    expect(within(screen.getByRole("region", { name: "Incoming CV" })).getByText(/scan that has not been read yet/)).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "New CV" })).getByText(/scan that has not been read yet/)).toBeTruthy();
     expect(screen.getByText(/text comparison is not available/i)).toBeTruthy();
   });
 
@@ -381,10 +387,10 @@ describe("states the backend can be in", () => {
     await loaded();
     const why = screen.getByRole("region", { name: /Why Cadence thinks/ });
     expect(within(why).getByText(/Phone signal matched, but the two CVs show no phone number in common/)).toBeTruthy();
-    expect(within(why).queryByText("Same phone number")).toBeNull();
+    expect(within(why).queryByText(/^Same phone number/)).toBeNull();
     // It is not offered as supporting evidence next to the recommendation either.
     const recommendation = screen.getByRole("region", { name: /Proposed by Cadence/ });
-    expect(within(recommendation).queryByText("Same phone number")).toBeNull();
+    expect(within(recommendation).queryByText(/^Same phone number/)).toBeNull();
   });
 
   it("flags conflicting date evidence", async () => {
@@ -412,8 +418,8 @@ describe("small screens", () => {
     setup();
     await loaded();
     const tabs = screen.getByRole("tablist", { name: "Choose a CV" });
-    const existing = within(tabs).getByRole("tab", { name: "Existing CV" });
-    const incoming = within(tabs).getByRole("tab", { name: "Incoming CV" });
+    const existing = within(tabs).getByRole("tab", { name: "Previous CV" });
+    const incoming = within(tabs).getByRole("tab", { name: "New CV" });
     expect(incoming.getAttribute("aria-selected")).toBe("true");
     expect(document.getElementById("panel-existing")!.className).toContain("hidden md:block");
     await user.click(existing);

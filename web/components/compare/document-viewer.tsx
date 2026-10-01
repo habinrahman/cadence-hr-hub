@@ -3,11 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getDocumentPages, type CompareSide, type Comparison, type DocumentPages, type TextDiffLine } from "@/lib/api";
 import { normalizeLine } from "@/lib/compare";
+import { previewKind, unavailableNotice } from "@/lib/page-preview";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/states";
 import { Tabs } from "@/components/ui/tabs";
 import type { EvidenceTarget } from "./field-comparison";
+import { PageView } from "./page-view";
 
 type Side = "existing" | "incoming";
 
@@ -17,15 +19,24 @@ function Panel({
   data,
   onlyHere,
   focus,
+  reviewId,
+  candidateId,
 }: {
   side: Side;
   title: string;
   data: CompareSide | null;
   onlyHere: TextDiffLine[];
   focus: EvidenceTarget | null;
+  reviewId: string;
+  candidateId: string | null;
 }) {
   const document = data?.document ?? null;
   const readable = data?.state === "ok" && document !== null;
+  // A PDF can be drawn even when it has no text layer; anything else keeps to the text comparison.
+  const kind = previewKind(document?.media_type);
+  const canPage = document !== null && kind === "pdf" && ["ok", "needs_ocr", "no_text"].includes(data?.state ?? "");
+  const [view, setView] = useState<"page" | "text">("page");
+  const showText = !canPage || view === "text";
   const [pages, setPages] = useState<DocumentPages | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
@@ -51,7 +62,7 @@ function Panel({
   useEffect(() => {
     if (!focus || !readable) return;
     if (focus.page) setPage(focus.page);
-    if (!pages && !loading) void load();
+    if (showText && !pages && !loading) void load();
     region.current?.scrollIntoView({ block: "nearest" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus]);
@@ -59,15 +70,54 @@ function Panel({
   const current = pages?.pages.find((p) => p.number === page) ?? pages?.pages[0];
 
   return (
-    <section aria-label={`${title} text`} className="min-w-0 rounded border border-rule bg-panel" ref={region}>
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-rule bg-inset px-3.5 py-1.5">
+    <section aria-label={`${title} text`} className="min-w-0 border border-rule bg-panel" ref={region}>
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-rule bg-inset px-4 py-2">
         <h3 className="text-[13px] font-bold">{title}</h3>
-        {readable && !pages ? (
-          <Button variant="secondary" busy={loading} onClick={load}>
-            Open CV text
-          </Button>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {canPage ? (
+            <div role="group" aria-label={`${title} view`} className="flex gap-1">
+              {(["page", "text"] as const).map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  aria-pressed={view === id}
+                  onClick={() => setView(id)}
+                  className={`min-h-9 border px-2.5 text-[13px] font-semibold ${
+                    view === id ? "border-human-ink bg-human-ink text-white" : "border-rule-strong bg-panel"
+                  }`}
+                >
+                  {id === "page" ? "Page view" : "Text"}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {readable && showText && !pages ? (
+            <Button variant="secondary" busy={loading} onClick={load}>
+              Open CV text
+            </Button>
+          ) : null}
+        </div>
       </header>
+      {document && !canPage && kind !== "pdf" ? (
+        <p className="hatch px-3.5 py-3 text-[13px]" role="status">
+          {unavailableNotice(kind)}
+        </p>
+      ) : null}
+      {canPage && !showText && document ? (
+        <PageView
+          reviewId={reviewId}
+          candidateId={candidateId}
+          document={document}
+          title={title}
+          page={page}
+          onPage={setPage}
+          quote={focus?.quote ?? null}
+          autoOpen={focus !== null}
+          textLayer={readable}
+        />
+      ) : null}
+      {showText ? (
+        <>
       {!readable ? (
         <p className="hatch px-3.5 py-3 text-[13px]" role="status">
           No readable text is on file for this CV, so there is nothing to show here.
@@ -89,7 +139,7 @@ function Panel({
                   type="button"
                   aria-pressed={p.number === current.number}
                   onClick={() => setPage(p.number)}
-                  className={`min-h-9 min-w-9 rounded-[3px] border px-2 text-[13px] font-semibold ${
+                  className={`min-h-9 min-w-9 border px-2 text-[13px] font-semibold ${
                     p.number === current.number ? "border-human-ink bg-human-ink text-white" : "border-rule-strong bg-panel"
                   }`}
                 >
@@ -100,7 +150,7 @@ function Panel({
             ) : (
               <label className="text-[13px]">
                 <span className="mr-2 font-semibold">Page</span>
-                <select className="min-h-9 rounded border border-rule-strong bg-panel px-2" value={current.number} onChange={(e) => setPage(Number(e.target.value))}>
+                <select className="min-h-9 border border-rule-strong bg-panel px-2" value={current.number} onChange={(e) => setPage(Number(e.target.value))}>
                   {pages.pages.map((p) => (
                     <option key={p.number} value={p.number}>
                       {p.number} of {pages.pages.length}
@@ -132,6 +182,8 @@ function Panel({
           </div>
         </div>
       ) : null}
+        </>
+      ) : null}
     </section>
   );
 }
@@ -144,19 +196,19 @@ export function DocumentCompare({ comparison, focus }: { comparison: Comparison;
   }, [focus]);
   const diff = comparison.text_diff;
   const panels: { side: Side; title: string; data: CompareSide | null; lines: TextDiffLine[] }[] = [
-    { side: "existing", title: "Existing CV", data: comparison.existing, lines: diff?.existing_only ?? [] },
-    { side: "incoming", title: "Incoming CV", data: comparison.incoming, lines: diff?.incoming_only ?? [] },
+    { side: "existing", title: "Previous CV", data: comparison.existing, lines: diff?.existing_only ?? [] },
+    { side: "incoming", title: "New CV", data: comparison.incoming, lines: diff?.incoming_only ?? [] },
   ];
   return (
     <section aria-labelledby="docs-heading">
-      <h2 id="docs-heading" className="mb-2 text-xs font-bold uppercase tracking-[0.07em] text-human-ink">
+      <h2 id="docs-heading" className="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-mut">
         Source documents
       </h2>
       {diff?.available ? (
         <p className="mb-2 text-[13px]">
           {diff.incoming_only_count === 0 && diff.existing_only_count === 0
             ? "The text of the two CVs is the same after collapsing spaces."
-            : `${diff.incoming_only_count} line${diff.incoming_only_count === 1 ? "" : "s"} only in the incoming CV, ${diff.existing_only_count} only in the existing CV.`}{" "}
+            : `${diff.incoming_only_count} line${diff.incoming_only_count === 1 ? "" : "s"} only in the new CV, ${diff.existing_only_count} only in the previous CV.`}{" "}
           <span className="text-xs text-mut">{diff.note}</span>
           {diff.truncated ? <span className="text-xs text-mut"> Only the first lines are marked.</span> : null}
         </p>
@@ -169,8 +221,8 @@ export function DocumentCompare({ comparison, focus }: { comparison: Comparison;
           value={mobile}
           onChange={(id) => setMobile(id as Side)}
           tabs={[
-            { id: "existing", label: "Existing CV" },
-            { id: "incoming", label: "Incoming CV" },
+            { id: "existing", label: "Previous CV" },
+            { id: "incoming", label: "New CV" },
           ]}
         />
       </div>
@@ -183,7 +235,15 @@ export function DocumentCompare({ comparison, focus }: { comparison: Comparison;
             aria-labelledby={`tab-${p.side}`}
             className={mobile === p.side ? "block" : "hidden md:block"}
           >
-            <Panel side={p.side} title={p.title} data={p.data} onlyHere={p.lines} focus={focus && focus.side === p.side ? focus : null} />
+            <Panel
+              side={p.side}
+              title={p.title}
+              data={p.data}
+              onlyHere={p.lines}
+              focus={focus && focus.side === p.side ? focus : null}
+              reviewId={comparison.review_id}
+              candidateId={comparison.candidate?.id ?? null}
+            />
           </div>
         ))}
       </div>

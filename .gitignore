@@ -15,3 +15,6 @@ tsconfig.tsbuildinfo
 *.egg-info/
 backend/build/
 .env.local
+
+# Real candidate CVs are local test data only. Never commit them.
+cvs/

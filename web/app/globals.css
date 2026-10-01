@@ -3,49 +3,69 @@
 :root {
   color-scheme: light;
 
+  /* Shell, taken from the approved Command Center, Candidate Intelligence and Candidate Record designs */
+  --nav: #111c32;
+  --nav-2: #1a2946;
+  --nav-active: #23395c;
+  --nav-line: #2a3b5c;
+  --nav-ink: #d3dae6;
+  --nav-mut: #8a96ab;
+
   /* Surfaces */
-  --nav: #0b3954;
-  --nav-ink: #cfe4f0;
-  --canvas: #eef5f8;
+  --canvas: #f2f4f7;
   --panel: #ffffff;
-  --inset: #e2edf2;
-  --rule: #c9dae3;
-  --rule-strong: #6f8ea1;
+  --inset: #f6f7f9;
+  --rule: #e1e5eb;
+  --rule-strong: #7d899c;
 
   /* Text */
-  --ink: #0e2230;
-  --mut: #4a6272;
+  --ink: #111a2e;
+  --mut: #5a6477;
 
-  /* Provenance. Hues are for borders, fills and stripes; -ink variants are for text and white-on-fill tags. */
-  --human: #0a6cc2;
-  --human-ink: #0a5ea8;
-  --human-bg: #e1f0fc;
-  --prop: #b86e00;
-  --prop-ink: #8a5000;
-  --prop-bg: #fff0d2;
-  --ok: #1b8a5a;
-  --ok-ink: #14704a;
-  --ok-bg: #dcf3e8;
-  --bad: #c8412f;
-  --bad-ink: #a83324;
-  --bad-bg: #fbe6e2;
-  --ev: #4f7591;
-  --ev-ink: #3f627c;
+  /* Human decisions and primary actions */
+  --human: #1f5ed6;
+  --human-ink: #1a4fb5;
+  --human-bg: #e9f0fd;
 
-  /* Object hues */
-  --t-rel: #6c5ce7;
-  --t-rel-ink: #5443c9;
-  --t-req: #00a6c8;
-  --t-req-ink: #00738c;
-  --t-match: #2ba57a;
-  --t-match-ink: #17795a;
-  --t-share: #e0567a;
-  --t-share-ink: #b02f5e;
+  /* Proposed by Cadence (never applied until a person decides) */
+  --prop: #b56f0a;
+  --prop-ink: #8a5300;
+  --prop-bg: #fdf4e3;
+
+  /* Outcomes */
+  --ok: #1d8656;
+  --ok-ink: #166c46;
+  --ok-bg: #e5f4ec;
+  --bad: #c13d2e;
+  --bad-ink: #a5321f;
+  --bad-bg: #fbeae7;
+
+  /* Source evidence */
+  --ev: #5a7391;
+  --ev-ink: #465f7b;
+
+  /* Object hues (icon tiles and row markers) */
+  --t-rel: #6b5bd2;
+  --t-rel-ink: #5343bd;
+  --t-rel-bg: #efedfb;
+  --t-req: #1d8fb3;
+  --t-req-ink: #146f8c;
+  --t-req-bg: #e6f4f9;
+  --t-match: #1f9467;
+  --t-match-ink: #17744f;
+  --t-match-bg: #e6f5ee;
+  --t-share: #cf4f73;
+  --t-share-ink: #ad3258;
+  --t-share-bg: #fbecf0;
 }
 
 @theme inline {
   --color-nav: var(--nav);
+  --color-nav-2: var(--nav-2);
+  --color-nav-active: var(--nav-active);
+  --color-nav-line: var(--nav-line);
   --color-nav-ink: var(--nav-ink);
+  --color-nav-mut: var(--nav-mut);
   --color-canvas: var(--canvas);
   --color-panel: var(--panel);
   --color-inset: var(--inset);
@@ -75,8 +95,12 @@
   --color-t-match-ink: var(--t-match-ink);
   --color-t-share: var(--t-share);
   --color-t-share-ink: var(--t-share-ink);
-  --font-sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --color-t-rel-bg: var(--t-rel-bg);
+  --color-t-req-bg: var(--t-req-bg);
+  --color-t-match-bg: var(--t-match-bg);
+  --color-t-share-bg: var(--t-share-bg);
+  --font-sans: var(--font-geist), system-ui, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, Consolas, "Liberation Mono", monospace;
 }
 
 /* Element defaults live in the base layer so Tailwind utilities (text-white, etc.) can override them. */
@@ -124,7 +148,22 @@
   .proposal {
     border: 1px dashed var(--prop);
     background: var(--prop-bg);
-    border-radius: 4px;
+    border-radius: 2px;
+  }
+
+  /* Section heading with the short rule to its right, as in the approved candidate record */
+  .rule-heading {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .rule-heading::after {
+    content: "";
+    margin-left: auto;
+    width: 28px;
+    height: 1px;
+    background: var(--rule-strong);
+    opacity: 0.55;
   }
 
   /* Native dialog */
@@ -132,12 +171,24 @@
     color: var(--ink);
     background: var(--panel);
     border: 1px solid var(--rule-strong);
-    border-radius: 6px;
+    border-radius: 3px;
     padding: 0;
+    margin: auto;
     max-width: min(92vw, 30rem);
   }
   dialog::backdrop {
-    background: rgba(14, 34, 48, 0.45);
+    background: rgba(17, 28, 50, 0.5);
+  }
+  dialog.drawer-left {
+    margin: 0 auto 0 0;
+    height: 100dvh;
+    max-height: none;
+    width: min(86vw, 18rem);
+    max-width: none;
+    border-radius: 0;
+    border: 0;
+    background: var(--nav);
+    color: var(--nav-ink);
   }
   dialog.slide-over {
     margin: 0 0 0 auto;

@@ -101,7 +101,7 @@ function NoteSection({
         <form onSubmit={add} className="mb-2 space-y-2" noValidate>
           <Field label={`New ${title.toLowerCase().replace(/s$/, "")}`} error={fieldError}>
             {({ id, describedBy, invalid }) => (
-              <textarea id={id} aria-describedby={describedBy} aria-invalid={invalid} className={`${inputClass} min-h-20`} value={body} onChange={(e) => setBody(e.target.value)} />
+              <textarea id={id} aria-describedby={describedBy} aria-invalid={invalid} className={`${inputClass} min-h-20 sm:min-h-20`} value={body} onChange={(e) => setBody(e.target.value)} />
             )}
           </Field>
           {failure ? <ErrorState error={failure} /> : null}

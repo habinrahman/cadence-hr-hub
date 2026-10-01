@@ -12,7 +12,7 @@ from app.api.deps import Auth, current_auth, get_session, require_engineer, requ
 from app.domain.report_schema import CreateReport, EngineerUpdate
 from app.domain.transitions import TransitionError
 from app.models import ProblemReport
-from app.services.problems import ReportError, create_report, get_report, list_reports, update_report
+from app.services.problems import ReportError, create_report, diagnostics, get_report, list_reports, update_report
 
 router = APIRouter()
 
@@ -27,9 +27,11 @@ def post_report(
         body = CreateReport.model_validate(payload)
         row = create_report(session, body, auth.actor)
         session.commit()
-    except ValidationError:
+    except ValidationError as exc:
         session.rollback()
-        raise HTTPException(status_code=422, detail="invalid_context") from None
+        # Say which rule was hit, so the recruiter knows what to take out of the text.
+        unsafe = any("unsafe" in str(error.get("msg", "")) for error in exc.errors())
+        raise HTTPException(status_code=422, detail="unsafe_report_text" if unsafe else "invalid_context") from None
     except (TransitionError, ReportError) as exc:
         session.rollback()
         raise _error(exc) from None
@@ -58,7 +60,10 @@ def get_one(
         row = get_report(session, report_id, auth.actor)
     except (TransitionError, ReportError) as exc:
         raise _error(exc) from None
-    return _payload(row)
+    payload = _payload(row)
+    if auth.role == "engineer":
+        payload["diagnostics"] = diagnostics(session, row)
+    return payload
 
 
 @router.patch("/problem-reports/{report_id}")

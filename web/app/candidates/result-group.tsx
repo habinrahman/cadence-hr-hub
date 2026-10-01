@@ -1,66 +1,87 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import type { CandidateGroup } from "@/lib/search-state";
 import { SEARCH_REASON } from "@/lib/labels";
 import { plural } from "@/lib/format";
 import { EvidenceQuote } from "@/components/domain/evidence-quote";
-import { LinkButton } from "@/components/ui/button";
-import { PanelRow } from "@/components/ui/panel";
+import { Avatar } from "@/components/ui/avatar";
+import { Icon } from "@/components/ui/icons";
 import { Tag } from "@/components/ui/tag";
 
-const SHOWN = 3;
+const SHOWN = 2;
 
+/** One candidate in the results table: who, why they matched, and the passage that says so. */
 export function ResultGroup({ group, highlight }: { group: CandidateGroup; highlight: string }) {
   const [all, setAll] = useState(false);
   const hits = all ? group.hits : group.hits.slice(0, SHOWN);
+  const name = group.name ?? "Unnamed candidate";
   return (
-    <PanelRow>
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <h3 className="min-w-0 break-words text-base font-bold">{group.name ?? "Unnamed candidate"}</h3>
-        {group.candidateId ? (
-          <LinkButton href={`/candidates/${group.candidateId}`}>Open profile</LinkButton>
-        ) : (
-          <span className="text-xs text-mut">No profile linked</span>
-        )}
+    <li className="grid grid-cols-[minmax(0,1fr)] gap-x-6 gap-y-3 border-t border-rule px-5 py-4 first:border-t-0 xl:grid-cols-[17rem_minmax(0,17rem)_minmax(0,1fr)_2rem]">
+      <div className="flex min-w-0 items-start gap-3">
+        <Avatar name={group.name} />
+        <div className="min-w-0">
+          <h3 className="break-words text-[14.5px] font-semibold leading-tight">{name}</h3>
+          <p className="mt-0.5 text-[12.5px] text-mut">
+            {plural(group.hits.length, "matching passage")}
+            {group.hits.some((h) => h.confirmed_profile === false) ? " · profile not confirmed" : ""}
+          </p>
+        </div>
       </div>
 
-      <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
-        {group.exact.map((reason) => (
-          <span key={reason} className="inline-flex items-center gap-1">
-            <Tag tone="ok">Exact</Tag>
-            <span className="text-xs">{SEARCH_REASON[reason] ?? reason}</span>
-          </span>
-        ))}
-        {group.approximate.map((reason) => (
-          <span key={reason} className="inline-flex items-center gap-1">
-            <Tag tone="unknown">Approximate</Tag>
-            <span className="text-xs">{SEARCH_REASON[reason] ?? reason}</span>
-          </span>
-        ))}
-      </p>
-      {group.approximateOnly ? (
-        <p className="mt-1 text-xs font-semibold text-prop-ink">
-          Only approximate wording matched. Read the CV before relying on this.
-        </p>
-      ) : null}
+      <div className="min-w-0">
+        <ul className="flex flex-wrap gap-1.5">
+          {group.exact.map((reason) => (
+            <li key={reason}>
+              <Tag tone="ok">{SEARCH_REASON[reason] ?? reason}</Tag>
+            </li>
+          ))}
+          {group.approximate.map((reason) => (
+            <li key={reason}>
+              <Tag tone="unknown">≈ {SEARCH_REASON[reason] ?? reason}</Tag>
+            </li>
+          ))}
+        </ul>
+        {group.approximateOnly ? (
+          <p className="mt-1.5 text-[12px] font-semibold text-prop-ink">Only approximate wording matched. Read the CV before relying on this.</p>
+        ) : null}
+      </div>
 
-      <ul className="mt-1">
-        {hits.map((hit) => (
-          <li key={`${hit.document_id}-${hit.chunk_id ?? "profile"}`}>
-            <EvidenceQuote
-              quote={hit.evidence}
-              highlight={highlight}
-              source={`${hit.chunk_id ? "Passage from a CV" : "Profile fields"}${hit.confirmed_profile === false ? " · profile not confirmed" : ""}`}
-            />
-          </li>
-        ))}
-      </ul>
-      {group.hits.length > SHOWN ? (
-        <button type="button" className="text-xs font-semibold text-human-ink underline" onClick={() => setAll(!all)}>
-          {all ? "Show fewer passages" : `Show ${plural(group.hits.length - SHOWN, "more passage")}`}
-        </button>
-      ) : null}
-    </PanelRow>
+      <div className="min-w-0 text-[13px]">
+        <ul>
+          {hits.map((hit) => (
+            <li key={`${hit.document_id}-${hit.chunk_id ?? "profile"}`}>
+              <EvidenceQuote
+                quote={hit.evidence}
+                highlight={highlight}
+                source={hit.chunk_id ? "Passage from a CV" : "Profile fields"}
+              />
+            </li>
+          ))}
+        </ul>
+        {group.hits.length > SHOWN ? (
+          <button type="button" aria-expanded={all} className="min-h-11 text-[12.5px] font-semibold text-human-ink underline sm:min-h-0" onClick={() => setAll(!all)}>
+            {all ? "Show fewer passages" : `Show ${plural(group.hits.length - SHOWN, "more passage")}`}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="flex items-start xl:justify-end">
+        {group.candidateId ? (
+          <Link
+            href={`/candidates/${group.candidateId}`}
+            prefetch={false}
+            aria-label={`Open the record for ${name}`}
+            className="inline-flex h-9 items-center gap-1.5 text-[13px] font-semibold text-human-ink no-underline xl:w-8 xl:justify-center"
+          >
+            <span className="xl:sr-only">Open record</span>
+            <Icon name="arrowUpRight" size={17} />
+          </Link>
+        ) : (
+          <span className="text-[12px] text-mut">No profile linked</span>
+        )}
+      </div>
+    </li>
   );
 }

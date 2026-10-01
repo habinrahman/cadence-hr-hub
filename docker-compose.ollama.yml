@@ -1,0 +1,32 @@
+# Optional: a local language model reads job descriptions into proposed requirements.
+#   docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
+#   docker exec cadence-hr-hub-ollama-1 ollama pull qwen2.5:3b-instruct   (once)
+# Only job descriptions are sent to it, and it runs on this machine. Without this file the build stays deterministic.
+x-llm-env: &llm-env
+  REQUIREMENT_PROVIDER: ollama
+  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_MODEL: qwen2.5:3b-instruct
+  OLLAMA_TIMEOUT_SECONDS: "180"
+
+services:
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+  api:
+    environment:
+      <<: *llm-env
+  worker:
+    environment:
+      <<: *llm-env
+    depends_on:
+      ollama:
+        condition: service_started
+
+volumes:
+  ollama:
+    name: cadence-ollama
+    external: true

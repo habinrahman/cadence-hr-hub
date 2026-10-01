@@ -9,10 +9,10 @@ function Card({ title, kind, side, candidateName }: { title: string; kind: "exis
   return (
     <section
       aria-label={title}
-      className={`min-w-0 rounded border bg-panel ${kind === "incoming" ? "border-human" : "border-rule-strong"}`}
+      className={`min-w-0 border bg-panel ${kind === "incoming" ? "border-human" : "border-rule-strong"}`}
     >
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-3.5 py-2">
-        <h2 className="text-[13px] font-bold uppercase tracking-[0.07em] text-human-ink">{title}</h2>
+        <h2 className="font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-mut">{title}</h2>
         {document ? (
           kind === "existing" ? (
             <Tag tone={document.is_current ? "neutral" : "unknown"}>{document.is_current ? "Current on file" : "Superseded"}</Tag>
@@ -43,7 +43,7 @@ function Card({ title, kind, side, candidateName }: { title: string; kind: "exis
           </dl>
         ) : null}
         {problem ? (
-          <p className="hatch mt-2 rounded border border-rule-strong px-2.5 py-1.5 text-[13px]" role="status">
+          <p className="hatch mt-2 border border-rule-strong px-2.5 py-1.5 text-[13px]" role="status">
             {problem}
           </p>
         ) : null}
@@ -60,8 +60,8 @@ export function DocumentCards({ comparison }: { comparison: Comparison }) {
   return (
     <div>
       <div className="grid grid-cols-[minmax(0,1fr)] gap-3 md:grid-cols-2">
-        <Card title="Existing CV" kind="existing" side={comparison.existing} candidateName={existingName} />
-        <Card title="Incoming CV" kind="incoming" side={comparison.incoming} candidateName={incomingName} />
+        <Card title="Previous CV" kind="existing" side={comparison.existing} candidateName={existingName} />
+        <Card title="New CV" kind="incoming" side={comparison.incoming} candidateName={incomingName} />
       </div>
       <p className="mt-1.5 text-xs text-mut">
         Upload dates say when a file arrived, not which CV has newer content. Filenames are never used as evidence.

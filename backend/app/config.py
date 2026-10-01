@@ -24,14 +24,20 @@ class Settings(BaseSettings):
     extractor_provider: str = "none"
     embedding_provider: str = "none"
     requirement_provider: str = "deterministic"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:3b-instruct"
+    ollama_timeout_seconds: float = 120.0
     recruiter_email: str = "recruiter@cadence.local"
     engineer_email: str = "engineer@cadence.local"
     # Starting point for the evaluation set. Tune it; do not treat it as a final decision.
-    identity_high_confidence: float = 0.85
+    # The identity score is a same-person confidence (see domain.confidence). One action is recommended only at
+    # 98 or above, which takes two exact contacts that agree; below it HR chooses with no suggestion.
+    identity_high_confidence: float = 0.98
     identity_relationship_cutoff: float = 0.5
-    identity_weight_email: float = 0.50
-    identity_weight_phone: float = 0.30
-    identity_weight_name: float = 0.20
+    # Email, phone and name: the share of the remaining doubt each removes when it agrees (0 to 1).
+    identity_weight_email: float = 0.90
+    identity_weight_phone: float = 0.80
+    identity_weight_name: float = 0.50
     identity_weight_dates: float = 0.40
     identity_weight_explicit_version: float = 0.25
     identity_weight_employment: float = 0.15
@@ -41,7 +47,6 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     smtp_from: str = "hr-hub@cadence.local"
-    demo_company_email: str = "company@localhost"
     mail_destination: str = "smtp"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     # Finished documents are archived after this many days. Rows are kept.
@@ -58,8 +63,8 @@ class Settings(BaseSettings):
     @field_validator("requirement_provider")
     @classmethod
     def requirement_provider_is_known(cls, value: str) -> str:
-        if value not in {"none", "deterministic", "bedrock"}:
-            raise ValueError("requirement provider must be none, deterministic, or bedrock")
+        if value not in {"none", "deterministic", "bedrock", "ollama"}:
+            raise ValueError("requirement provider must be none, deterministic, bedrock, or ollama")
         return value
 
     @field_validator("mail_destination")

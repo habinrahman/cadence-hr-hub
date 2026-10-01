@@ -18,9 +18,10 @@ from app.models import (
     ApprovalDecision,
     AuditEvent,
     Candidate,
-    CandidateExperience,
-    CandidateSkill,
+    CandidateMatch,
     HiringRequest,
+    MatchRequirementResult,
+    RequestRequirement,
     SharingRecord,
     Shortlist,
     ShortlistCandidate,
@@ -36,87 +37,6 @@ class SendError(Exception):
         self.code = code
 
 
-def approve_candidate(session: Session, candidate_id: UUID, actor: Actor) -> ApprovalDecision:
-    _recruiter(session, actor)
-    candidate = session.get(Candidate, candidate_id)
-    if candidate is None:
-        raise SendError("not_found")
-    row = ApprovalDecision(
-        subject_type="candidate",
-        subject_id=candidate_id,
-        decision="approved",
-        actor_user_id=actor.user_id,
-    )
-    session.add(row)
-    session.flush()
-    write_audit(
-        session,
-        actor=actor,
-        action="candidate_approved",
-        entity_type="candidate",
-        entity_id=candidate.id,
-        detail={"candidate_id": str(candidate.id)},
-    )
-    return row
-
-
-def send_to_company(session: Session, candidate_id: UUID, actor: Actor, sender: MailSender) -> SharingRecord:
-    user = _recruiter(session, actor)
-    candidate = session.get(Candidate, candidate_id)
-    if candidate is None:
-        raise SendError("not_found")
-    approval = session.scalar(
-        select(ApprovalDecision.id).where(
-            ApprovalDecision.subject_type == "candidate",
-            ApprovalDecision.subject_id == candidate_id,
-            ApprovalDecision.decision == "approved",
-        )
-    )
-    if approval is None:
-        raise SendError("approval_required")
-    settings = get_settings()
-    message = OutboundEmail(
-        to=settings.demo_company_email,
-        subject=f"Candidate {candidate_id}",
-        body=(
-            "A recruiter approved a candidate for company review.\n"
-            f"Reference: {candidate_id}\n"
-        ),
-    )
-    try:
-        sender.send(message)
-    except Exception:
-        write_audit(
-            session,
-            actor=actor,
-            action="company_send_failed",
-            entity_type="candidate",
-            entity_id=candidate.id,
-            detail={"candidate_id": str(candidate.id), "error_code": "mail_delivery_failed"},
-        )
-        raise SendError("mail_delivery_failed") from None
-    record = SharingRecord(
-        shortlist_id=None,
-        candidate_id=candidate.id,
-        actor_user_id=user.id,
-        recipient=settings.demo_company_email,
-        status="sent",
-        sent_at=utcnow(),
-        destination=settings.mail_destination,
-    )
-    session.add(record)
-    session.flush()
-    write_audit(
-        session,
-        actor=actor,
-        action="company_send_succeeded",
-        entity_type="sharing_record",
-        entity_id=record.id,
-        detail={"candidate_id": str(candidate.id)},
-    )
-    return record
-
-
 def share_preview(session: Session, request_id: UUID, candidate_id: UUID, actor: Actor) -> dict:
     _recruiter(session, actor)
     request = _request(session, request_id)
@@ -128,7 +48,9 @@ def share_preview(session: Session, request_id: UUID, candidate_id: UUID, actor:
 
 def approve_share(session: Session, request_id: UUID, candidate_id: UUID, actor: Actor) -> ApprovalDecision:
     user = _recruiter(session, actor)
-    entry = _shortlisted(session, request_id, candidate_id)
+    _confirmed_pool(session, _request(session, request_id))
+    entry = _shortlisted(session, request_id, candidate_id, lock=True)
+    _still_matched(session, entry)
     existing = _share_approval(session, entry.id)
     if existing is not None:
         return existing
@@ -163,14 +85,20 @@ def send_share(
     _local_mail_only()
     request = _request(session, request_id)
     candidate = _candidate(session, candidate_id)
-    entry = _shortlisted(session, request_id, candidate_id)
+    # The lock is held until the sharing record commits. A second click waits here, then finds the record and
+    # returns it: the company receives one email, never one per click.
+    entry = _shortlisted(session, request_id, candidate_id, lock=True)
     existing = _sent_share(session, entry)
     if existing is not None:
         return existing
+    _confirmed_pool(session, request)
+    _still_matched(session, entry)
     if _share_approval(session, entry.id) is None:
         raise SendError("approval_required")
+    if not request.contact_email:
+        raise SendError("recipient_missing")  # never a default address: the recruiter names the company contact
     settings = get_settings()
-    message = _share_message(session, request, candidate)
+    message = _share_message(session, request, candidate, entry)
     try:
         sender.send(message)
     except Exception:
@@ -193,7 +121,7 @@ def send_share(
         request_id=request.id,
         candidate_id=candidate.id,
         actor_user_id=user.id,
-        recipient=settings.demo_company_email,
+        recipient=request.contact_email,
         status="sent",
         sent_at=utcnow(),
         destination=settings.mail_destination,
@@ -242,10 +170,10 @@ def share_view(session: Session, record: SharingRecord) -> dict:
 
 
 def _preview_payload(session, request, candidate, entry, record) -> dict:
-    selected = _selected_information(session, candidate)
+    selected = _selected_information(session, candidate, entry)
     return {
         "company": request.company_name,
-        "recipient": get_settings().demo_company_email,
+        "recipient": request.contact_email,
         "candidate": _public_name(candidate.display_name),
         "candidate_id": str(candidate.id),
         "role": request.job_title,
@@ -255,48 +183,59 @@ def _preview_payload(session, request, candidate, entry, record) -> dict:
     }
 
 
-def _share_message(session, request: HiringRequest, candidate: Candidate) -> OutboundEmail:
-    selected = _selected_information(session, candidate)
-    skills = ", ".join(selected["skills"]) or "none recorded"
+def _share_message(session, request: HiringRequest, candidate: Candidate, entry: ShortlistCandidate) -> OutboundEmail:
+    selected = _selected_information(session, candidate, entry)
+    met = ", ".join(selected["requirements_met"]) or "none recorded"
     years = selected["years_of_experience"]
     years_line = "not recorded" if years is None else str(years)
-    title = selected["title"] or "not recorded"
     body = (
         "A recruiter approved sharing a shortlisted candidate.\n"
         f"Company: {request.company_name}\n"
         f"Role: {request.job_title}\n"
         f"Candidate: {_public_name(candidate.display_name)}\n"
-        f"Title: {title}\n"
         f"Years: {years_line}\n"
-        f"Skills: {skills}\n"
+        f"Requirements met: {met}\n"
         f"Reference: {candidate.id}\n"
     )
     if "@" in body:
         raise SendError("unsafe_share_payload")
     return OutboundEmail(
-        to=get_settings().demo_company_email,
-        subject=f"Shortlisted candidate {candidate.id}",
+        to=request.contact_email,
+        subject=_subject(request),
         body=body,
     )
 
 
-def _selected_information(session: Session, candidate: Candidate) -> dict:
-    skills = session.scalars(
-        select(CandidateSkill.name).where(CandidateSkill.candidate_id == candidate.id).order_by(CandidateSkill.name)
-    ).all()
-    title = session.scalar(
-        select(CandidateExperience.title)
-        .where(CandidateExperience.candidate_id == candidate.id, CandidateExperience.title.is_not(None))
-        .order_by(CandidateExperience.start_date.desc())
-    )
+def _subject(request: HiringRequest) -> str:
+    """Company and role only, on one line: a header never carries a line break or candidate details."""
+    text = f"Candidate shortlisted for {request.company_name} — {request.job_title}"
+    return " ".join(text.split())[:200]
+
+
+def _selected_information(session: Session, candidate: Candidate, entry: ShortlistCandidate) -> dict:
+    """What the company is told: the years and the requirements of THIS request the candidate met.
+
+    No job title: titles are read from free-form CV lines and a fragment such as "financial, and humanitarian aid
+    delivered to Ukraine (" was about to be sent to a company as one. HR still reads titles on the profile.
+
+    Not the raw skills list: a CV's skills section carries hobbies and unrelated detail ("Poker", "Graffiti") that
+    has no business leaving Cadence. Every requirement named here was met with evidence the recruiter reviewed."""
+    met: list[str] = []
+    if entry.match_id is not None:
+        rows = session.execute(
+            select(RequestRequirement.requirement_text, RequestRequirement.label)
+            .join(MatchRequirementResult, MatchRequirementResult.requirement_id == RequestRequirement.id)
+            .where(MatchRequirementResult.match_id == entry.match_id, MatchRequirementResult.result == "meets")
+            .order_by(RequestRequirement.position)
+        ).all()
+        met = [f"{text}+ years of experience" if label == "experience" else text for text, label in rows]
     years = None
     if candidate.years_of_experience is not None:
         number = float(candidate.years_of_experience)
         years = int(number) if number.is_integer() else number
     return {
         "years_of_experience": years,
-        "skills": [name for name in skills if _safe_label(name)],
-        "title": title if title and _safe_label(title) else None,
+        "requirements_met": [name for name in met if _safe_label(name)],
     }
 
 
@@ -318,6 +257,21 @@ def _local_mail_only() -> None:
         raise SendError("external_mail_blocked")
 
 
+def _confirmed_pool(session: Session, request: HiringRequest) -> None:
+    """Nothing is shared from a provisional pool: its requirements are not yet the ones HR approved."""
+    from app.services.hiring import pool_status
+
+    if pool_status(session, request) != "confirmed":
+        raise SendError("pool_provisional")
+
+
+def _still_matched(session: Session, entry: ShortlistCandidate) -> None:
+    """A rematch on edited requirements can rule out a candidate who was shortlisted earlier. That candidate is not shared."""
+    match = session.get(CandidateMatch, entry.match_id) if entry.match_id else None
+    if match is None or match.disposition not in {"recommended", "needs_review"}:
+        raise SendError("not_shortlistable")
+
+
 def _request(session: Session, request_id: UUID) -> HiringRequest:
     row = session.get(HiringRequest, request_id)
     if row is None:
@@ -332,8 +286,8 @@ def _candidate(session: Session, candidate_id: UUID) -> Candidate:
     return row
 
 
-def _shortlisted(session: Session, request_id: UUID, candidate_id: UUID) -> ShortlistCandidate:
-    row = session.scalar(
+def _shortlisted(session: Session, request_id: UUID, candidate_id: UUID, *, lock: bool = False) -> ShortlistCandidate:
+    query = (
         select(ShortlistCandidate)
         .join(Shortlist, Shortlist.id == ShortlistCandidate.shortlist_id)
         .where(
@@ -342,6 +296,9 @@ def _shortlisted(session: Session, request_id: UUID, candidate_id: UUID) -> Shor
             ShortlistCandidate.review_state == "shortlisted",
         )
     )
+    if lock:
+        query = query.with_for_update(of=ShortlistCandidate).execution_options(populate_existing=True)
+    row = session.scalar(query)
     if row is None:
         raise SendError("not_shortlisted")
     return row

@@ -358,13 +358,17 @@ def test_low_confidence_keeps_the_current_cv_until_a_person_chooses(session):
     session.commit()
     session.refresh(incoming)
     session.refresh(document)
-    assert incoming.candidate_id == candidate.id
+    # Delete Duplicate archives only the duplicate upload. The candidate and the current CV are untouched.
+    assert incoming.status == "archived"
+    assert incoming.candidate_id is None
     assert incoming.is_current is False
     assert document.is_current is True
+    assert document.candidate_id == candidate.id
     from app.models import AuditEvent
 
     decided = session.scalar(select(AuditEvent).where(AuditEvent.action == "duplicate_review_decided"))
     assert decided.detail["human_action"] == "record_duplicate"
+    assert decided.detail["canonical_document_id"] == str(document.id)
 
 
 def test_exact_email_without_dates_still_waits_for_hr(session):
@@ -387,7 +391,7 @@ def test_exact_email_without_dates_still_waits_for_hr(session):
     assert any(item["code"] == "email" and item["state"] == "matched" for item in review.signals["evidence"])
 
 
-def test_exact_phone_recommends_an_update_and_waits_for_hr(session):
+def test_exact_phone_alone_is_strong_and_waits_for_hr(session):
     from app.models import AuditEvent
 
     actor = _actor(session)
@@ -407,8 +411,10 @@ def test_exact_phone_recommends_an_update_and_waits_for_hr(session):
     assert original.is_current is True
     review = session.scalar(select(DuplicateReview).where(DuplicateReview.document_id == incoming.id))
     assert review.likely_relationship == "updated_cv"
-    assert float(review.confidence) >= 85
-    assert review.recommended_action == "accept_update"
+    # A phone number alone is strong evidence, but not corroborated enough for one suggested action.
+    assert float(review.confidence) >= 75
+    assert review.recommended_action is None
+    assert "accept_update" in review.offered_actions
     assert any(item["code"] == "phone" and item["state"] == "matched" for item in review.signals["evidence"])
     decide_duplicate_review(session, review, "accept_update", actor)
     session.commit()
@@ -558,3 +564,12 @@ def test_schema_has_no_pii_trace_columns_and_no_inferred_attributes(session):
     sharing = {column["name"]: column for column in inspect(bind).get_columns("sharing_records")}
     assert sharing["shortlist_id"]["nullable"] is True
     assert len(tables) >= 28
+
+
+def test_document_noise_is_not_stored_as_a_skill():
+    from app.services.apply_draft import skill_name_is_noise
+
+    for noise in ("Carlos Galvez - Page 1 of 1", "August 2018", "06/2025 - 07/2025", "Aug 2025 – Present", "A • B • C", "2024"):
+        assert skill_name_is_noise(noise), noise
+    for skill in ("Python", "Node.js", "C++", "Linux (Ubuntu)", "Maya", "SQL Server 2019", "Machine Learning"):
+        assert not skill_name_is_noise(skill), skill

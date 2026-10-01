@@ -24,3 +24,17 @@ class LocalStorage:
         if not path.is_file():
             raise FileNotFoundError(key)
         return path.read_bytes()
+
+    def delete(self, key: str) -> None:
+        """Remove a stored object and its now-empty shard directory. Keys come from the
+        database, so refuse anything that would escape the storage root."""
+        path = (self.root / key).resolve()
+        if path == self.root.resolve() or self.root.resolve() not in path.parents:
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        parent = path.parent
+        if parent != self.root.resolve() and not any(parent.iterdir()):
+            parent.rmdir()

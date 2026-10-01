@@ -1,8 +1,16 @@
 """Relationship confidence from explainable signals.
 
-The number is computed here. A model's self-reported confidence is not an input.
-Filename wording is not an input. An unknown signal is left out of the average;
-it is not treated as zero.
+The number answers one question: how confident are we that the two CVs belong to the same person?
+It is computed here. A model's self-reported confidence is not an input. Filename wording is not an input.
+
+Two steps, kept apart:
+
+1. Identity. Each supporting signal removes a share of the remaining doubt (an exact email 90% of it, an exact
+   phone 80%, a name up to 50%, overlapping CV content up to 30%), so independent agreements add up without
+   passing 100. A signal that could not be read on both CVs is missing: it is left out and lowers nothing.
+   A different email or phone on both CVs is a contradiction and cuts the result.
+2. Relationship. Only for a pair that looks like one person: newer dates and changed content say updated CV,
+   matching content says duplicate. This picks the label. It never lowers the identity number.
 """
 
 from __future__ import annotations
@@ -20,6 +28,9 @@ CREATE_SEPARATE_CANDIDATE = "create_separate_candidate"
 
 ALL_ACTIONS = (ACCEPT_UPDATE, RECORD_DUPLICATE, CREATE_SEPARATE_CANDIDATE)
 
+# An identifier that on its own removes at least half the doubt (an exact email or phone with the default weights).
+STRONG_IDENTIFIER = 0.5
+
 ACTION_FOR = {
     UPDATED_CV: ACCEPT_UPDATE,
     DUPLICATE: RECORD_DUPLICATE,
@@ -35,9 +46,15 @@ STATUS_FOR = {
 
 @dataclass(frozen=True)
 class Weights:
-    email: float = 0.50
-    phone: float = 0.30
-    name: float = 0.20
+    # Identity: the share of the remaining doubt a signal removes when it agrees (0 to 1).
+    email: float = 0.90
+    phone: float = 0.80
+    name: float = 0.50  # times the name similarity, so a name on its own never reaches high confidence
+    corroboration: float = 0.30  # times the mean content overlap; overlap supports, low overlap is not against
+    # Identity: the share of the result taken away when both CVs carry a different value.
+    email_conflict: float = 0.50
+    phone_conflict: float = 0.40
+    # Relationship only: these choose updated against duplicate and never change the identity number.
     dates: float = 0.40
     explicit_version: float = 0.25
     employment: float = 0.15
@@ -83,6 +100,7 @@ class Assessment:
     candidate_ids: tuple[UUID, ...]
     signals: tuple[SignalRecord, ...]
     ambiguous: bool = False
+    contradictions: tuple[str, ...] = ()
 
 
 @dataclass
@@ -92,6 +110,7 @@ class _Scored:
     confidence: float
     p_same: float | None
     signals: tuple[SignalRecord, ...]
+    contradictions: tuple[str, ...] = ()
 
 
 def assess(
@@ -138,16 +157,23 @@ def signal_payload(record: SignalRecord) -> dict:
 
 def _present(scored: _Scored, high_confidence: float, *, candidate_ids: tuple[UUID, ...]) -> Assessment:
     action = ACTION_FOR[scored.relationship]
-    high_enough = scored.confidence >= high_confidence
+    confidence = round(scored.confidence, 4)
+    if scored.relationship == DIFFERENT_CANDIDATE:
+        # The number is the same-person confidence, so a confident "different person" is a low one.
+        high_enough = round(1.0 - scored.confidence, 4) >= high_confidence
+    else:
+        # A contradicting email or phone never leaves a single merge or duplicate recommendation.
+        high_enough = confidence >= high_confidence and not scored.contradictions
     return Assessment(
         comparable=True,
         relationship=scored.relationship,
-        confidence=round(scored.confidence, 4),
+        confidence=confidence,
         recommended_action=action if high_enough else None,
         offered_actions=(action,) if high_enough else ALL_ACTIONS,
         candidate_id=scored.candidate_id if len(candidate_ids) == 1 else None,
         candidate_ids=candidate_ids,
         signals=scored.signals,
+        contradictions=scored.contradictions,
     )
 
 
@@ -174,8 +200,11 @@ def _ambiguous(scored: list[_Scored], high_confidence: float) -> Assessment:
 def _score_pair(pair: PairEvidence, weights: Weights, relationship_cutoff: float) -> _Scored:
     signals: list[SignalRecord] = []
     identity: list[tuple[float, float]] = []
-    _flag(signals, identity, pair.candidate_id, "email", weights.email, pair.email_match)
-    _flag(signals, identity, pair.candidate_id, "phone", weights.phone, pair.phone_match)
+    # A contradiction is recorded with the weight it actually carries, which is its conflict strength.
+    email_weight = weights.email_conflict if pair.email_match is False else weights.email
+    phone_weight = weights.phone_conflict if pair.phone_match is False else weights.phone
+    _flag(signals, identity, pair.candidate_id, "email", email_weight, pair.email_match)
+    _flag(signals, identity, pair.candidate_id, "phone", phone_weight, pair.phone_match)
     _unit(signals, identity, pair.candidate_id, "name", weights.name, pair.name_similarity)
     # Identical bytes are the same document at ingest. A different hash does not choose a relationship.
     signals.append(
@@ -205,39 +234,71 @@ def _score_pair(pair: PairEvidence, weights: Weights, relationship_cutoff: float
     _unit(signals, content, pair.candidate_id, "skills", weights.skills, pair.skills_similarity)
     _unit(signals, content, pair.candidate_id, "semantic", weights.semantic, pair.semantic_similarity)
 
-    p_same = _mean(identity)
-    if p_same is None:
+    # Without an email, phone or name on both CVs there is nothing that says who the person is.
+    if not identity:
         return _Scored(pair.candidate_id, DIFFERENT_CANDIDATE, 0.0, None, tuple(signals))
 
-    # An exact contact on a different file is strong identity evidence. Unknown dates
-    # stay out of the average; they do not cut that evidence in half. These weights
-    # are a starting point for the evaluation set, not a validated model.
-    exact_contact = pair.email_match is True or pair.phone_match is True
-    contrary_contact = pair.email_match is False or pair.phone_match is False
-    if (
-        p_same >= relationship_cutoff
-        and exact_contact
-        and not contrary_contact
-        and not recency
-        and not content
-    ):
-        return _Scored(pair.candidate_id, UPDATED_CV, p_same, p_same, tuple(signals))
-
-    p_update = _update_probability(recency, content)
-    if p_same >= relationship_cutoff:
-        if p_update >= relationship_cutoff:
-            relationship = UPDATED_CV
-            confidence = p_same * p_update
-        else:
-            relationship = DUPLICATE
-            confidence = p_same * (1.0 - p_update)
-    else:
+    # These strengths are a starting point for the evaluation set, not a validated model.
+    p_same, contradictions = _same_person(pair, weights, content)
+    # An exact email or phone in common, with the other one different, is conflicting evidence: people change email
+    # addresses. That pair is never labelled a different person. It keeps its lowered number, and the contradiction
+    # already rules out any recommendation, so HR decides with both facts in front of them.
+    conflicting = bool(contradictions) and (
+        (pair.email_match is True and weights.email >= STRONG_IDENTIFIER)
+        or (pair.phone_match is True and weights.phone >= STRONG_IDENTIFIER)
+    )
+    if p_same < relationship_cutoff and not conflicting:
         relationship = DIFFERENT_CANDIDATE
-        confidence = 1.0 - p_same
-    return _Scored(pair.candidate_id, relationship, confidence, p_same, tuple(signals))
+    elif pair.document_hash_match:
+        relationship = DUPLICATE
+    elif _update_probability(recency, content) >= relationship_cutoff:
+        relationship = UPDATED_CV
+    else:
+        relationship = DUPLICATE
+    # The score is the same-person confidence. Whether it is an update or a duplicate only picks the label.
+    return _Scored(pair.candidate_id, relationship, p_same, p_same, tuple(signals), contradictions)
+
+
+def _same_person(
+    pair: PairEvidence, weights: Weights, content: list[tuple[float, float]]
+) -> tuple[float, tuple[str, ...]]:
+    """Each agreeing signal removes its share of the remaining doubt; each contradiction cuts the result.
+
+    Missing evidence is left out. It is not counted for or against. Low content overlap is not against either:
+    an updated CV is expected to differ.
+    """
+    support: list[float] = []
+    against: list[float] = []
+    contradictions: list[str] = []
+    for code, match, strength, conflict in (
+        ("email", pair.email_match, weights.email, weights.email_conflict),
+        ("phone", pair.phone_match, weights.phone, weights.phone_conflict),
+    ):
+        if match is True:
+            support.append(strength)
+        elif match is False:
+            against.append(conflict)
+            contradictions.append(code)
+    if pair.name_similarity is not None:
+        support.append(weights.name * _fraction(pair.name_similarity))
+    overlap = 1.0 if pair.document_hash_match else _mean(content)
+    if overlap is not None:
+        support.append(weights.corroboration * overlap)
+    doubt = 1.0
+    for strength in support:
+        doubt *= 1.0 - _fraction(strength)
+    kept = 1.0
+    for strength in against:
+        kept *= 1.0 - _fraction(strength)
+    return (1.0 - doubt) * kept, tuple(contradictions)
+
+
+def _fraction(value: float) -> float:
+    return min(1.0, max(0.0, value))
 
 
 def _update_probability(recency: list[tuple[float, float]], content: list[tuple[float, float]]) -> float:
+    """Updated against duplicate, for a pair already judged to be one person. Nothing known is an even 0.5."""
     recency_mean = _mean(recency)
     content_mean = _mean(content)
     if recency_mean is None and content_mean is None:

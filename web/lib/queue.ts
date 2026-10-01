@@ -11,6 +11,9 @@ export type QueueGroup = {
   created_at: string;
   href: string;
   requestId: string | null;
+  relationship: string | null;
+  recommendedAction: string | null;
+  confidence: number | null;
 };
 
 export function requestIdFromHref(href: string): string | null {
@@ -19,7 +22,8 @@ export function requestIdFromHref(href: string): string | null {
   return new URLSearchParams(query).get("request");
 }
 
-/** The server emits one row per proposed requirement and per match. Group those by request. */
+/** The server emits one item per request, with a count, for requirement approvals and confirmed pools. Items that
+ * arrive without a count (one row each) are still grouped by request. */
 const GROUPED = new Set(["requirement_approval", "match_review"]);
 
 export function groupQueue(items: QueueItem[]): QueueGroup[] {
@@ -30,7 +34,7 @@ export function groupQueue(items: QueueItem[]): QueueGroup[] {
     const key = grouped ? `${item.type}:${requestId}` : `${item.type}:${item.href}:${index}`;
     let subject = item.subject;
     const names: string[] = [];
-    if (grouped && item.type === "match_review") {
+    if (grouped && item.type === "match_review" && item.count === undefined) {
       const cut = item.subject.indexOf(" · ");
       if (cut > 0) {
         names.push(item.subject.slice(0, cut));
@@ -44,15 +48,18 @@ export function groupQueue(items: QueueItem[]): QueueGroup[] {
         type: item.type,
         subject,
         names,
-        count: 1,
+        count: item.count ?? 1,
         status: item.status,
         created_at: item.created_at,
         href: item.href,
         requestId,
+        relationship: item.relationship ?? null,
+        recommendedAction: item.recommended_action ?? null,
+        confidence: item.confidence ?? null,
       });
       return;
     }
-    existing.count += 1;
+    existing.count += item.count ?? 1;
     existing.names.push(...names);
     if (item.created_at > existing.created_at) existing.created_at = item.created_at;
   });

@@ -26,6 +26,21 @@ def name_similarity(left: str | None, right: str | None) -> float | None:
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
+def national_phone(normalized: str) -> str:
+    """Digits without the trunk or international prefix zeros: 0524449121 and 00972524449121 lose their leading 0s."""
+    return normalized.lstrip("0")
+
+
+def phones_match(left: str, right: str) -> bool:
+    """The same number written two ways, such as +972 52 444 9121 and 052 444 9121, or +1 510 570 7106 and
+    510 570 7106. The shorter national number must be the end of the longer one, at least 8 digits long, and the
+    longer one may only add a country code (1 to 3 digits)."""
+    if left == right:
+        return True
+    short, long = sorted((national_phone(left), national_phone(right)), key=len)
+    return len(short) >= 8 and long.endswith(short) and len(long) - len(short) <= 3
+
+
 def _name_tokens(value: str) -> set[str]:
     stop = {"cv", "resume", "the", "and"}
     tokens = set(re.findall(r"[a-z]{2,}", value.casefold()))

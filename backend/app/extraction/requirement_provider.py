@@ -47,4 +47,15 @@ def get_requirement_reader(provider: str | None = None) -> RequirementReader | N
         return DeterministicRequirementReader()
     if name == "bedrock":
         return BedrockRequirementReader()
+    if name == "ollama":
+        from app.config import get_settings as settings
+        from app.extraction.llm_requirements import LlmWithFallbackReader, OllamaRequirementReader
+
+        config = settings()
+        return LlmWithFallbackReader(
+            OllamaRequirementReader(
+                base_url=config.ollama_base_url, model=config.ollama_model, timeout=config.ollama_timeout_seconds
+            ),
+            DeterministicRequirementReader(),
+        )
     raise ExtractorUnavailable()

@@ -5,7 +5,9 @@ from pathlib import Path
 os.environ["ENVIRONMENT"] = "local"
 os.environ["HUB_RECRUITER_TOKEN"] = "dev-recruiter-token"
 os.environ["HUB_ENGINEER_TOKEN"] = "dev-engineer-token"
-os.environ["DATABASE_URL"] = "postgresql+psycopg://hub:hub@localhost:15432/hub_test"
+# Sessions that share one Postgres can each pick their own test database: HUB_TEST_DB=hub_test_mine pytest
+TEST_DB = os.environ.get("HUB_TEST_DB", "hub_test")
+os.environ["DATABASE_URL"] = f"postgresql+psycopg://hub:hub@localhost:15432/{TEST_DB}"
 os.environ["STORAGE_DIR"] = tempfile.mkdtemp(prefix="hub-storage-")
 os.environ["PROCESSING_VERSION"] = "1"
 os.environ["EXTRACTOR_PROVIDER"] = "none"
@@ -34,9 +36,9 @@ TEST_URL = os.environ["DATABASE_URL"]
 def migrated_database() -> Iterator[None]:
     admin = create_engine(ADMIN_URL, isolation_level="AUTOCOMMIT")
     with admin.connect() as connection:
-        exists = connection.execute(text("SELECT 1 FROM pg_database WHERE datname = 'hub_test'")).scalar()
+        exists = connection.execute(text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": TEST_DB}).scalar()
         if not exists:
-            connection.execute(text("CREATE DATABASE hub_test"))
+            connection.execute(text(f'CREATE DATABASE "{TEST_DB}"'))
     admin.dispose()
 
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -56,6 +58,8 @@ def session(migrated_database) -> Iterator[Session]:
         db.close()
         cleanup = factory()
         names = ", ".join(f'"{table.name}"' for table in reversed(Base.metadata.sorted_tables))
+        # Test cleanup only: audit_events rejects TRUNCATE, so the local superuser skips triggers for this one statement.
+        cleanup.execute(text("SET LOCAL session_replication_role = replica"))
         cleanup.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
         cleanup.commit()
         cleanup.close()

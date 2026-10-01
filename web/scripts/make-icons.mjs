@@ -8,9 +8,9 @@ import path from "node:path";
 const out = path.join(path.dirname(fileURLToPath(import.meta.url)), "../public/icons");
 mkdirSync(out, { recursive: true });
 
-const NAV = [0x0b, 0x39, 0x54];
-const A = [0x6c, 0x5c, 0xe7]; // relationship violet
-const B = [0x2b, 0xa5, 0x7a]; // match green
+const NAV = [0x11, 0x1c, 0x32];
+const A = [0x6b, 0x5b, 0xd2]; // relationship violet
+const B = [0x1f, 0x94, 0x67]; // match green
 
 const crcTable = Array.from({ length: 256 }, (_, n) => {
   let c = n;

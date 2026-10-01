@@ -98,9 +98,10 @@ def test_sourced_entry_rejects_incomplete_or_invalid_fields(session):
     assert bad_email.json()["detail"] == "invalid_email"
     assert bad_type.json()["detail"] == "invalid_source_type"
     assert bad_phone.json()["detail"] == "invalid_phone"
-    assert missing_file.status_code == 422
-    assert missing_file.json()["detail"] == "missing_cv"
-    assert session.scalar(select(func.count()).select_from(CandidateSource)) == 0
+    # No CV is not an error: the person is recorded as a lead (see the lead tests below).
+    assert missing_file.status_code == 201
+    assert missing_file.json()["document_id"] is None
+    assert session.scalar(select(func.count()).select_from(CandidateSource)) == 1
 
 
 def test_declared_email_opens_the_same_review_and_does_not_create_a_profile(session):
@@ -171,3 +172,86 @@ def test_a_new_sourced_candidate_keeps_the_source(session):
     assert created_event.detail["source_type"] == "linkedin"
     assert "@" not in json.dumps(created_event.detail)
     assert session.scalar(select(AuditEvent).where(AuditEvent.action == "sourced_duplicate_detected")) is None
+
+
+# ---------- a lead with no CV yet (a LinkedIn profile, a referral) ----------
+
+
+def _lead(client, **fields):
+    data = {"name": "Lena Lead", "source_type": "linkedin", "source_reference": "linkedin.com/in/lena-lead"}
+    data.update(fields)
+    return client.post("/sourced-candidates", headers=RECRUITER, data=data)
+
+
+def test_a_lead_without_a_cv_creates_a_findable_profile_that_keeps_its_source(session):
+    provision(session)
+    session.commit()
+    with TestClient(app) as client:
+        created = _lead(client, email="lena@example.com", phone="+1 415 555 0101", notes="Met at a meetup")
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["document_id"] is None
+        assert body["source_type"] == "linkedin"
+        assert body["source_reference"] == "linkedin.com/in/lena-lead"
+        profile = client.get(f"/candidates/{body['candidate_id']}", headers=RECRUITER).json()
+        found = client.get("/search", params={"name": "Lena"}, headers=RECRUITER).json()["results"]
+        listed = client.get("/candidates", headers=RECRUITER).json()["candidates"]
+    assert profile["display_name"] == "Lena Lead"
+    assert [hit["candidate_id"] for hit in found] == [body["candidate_id"]]
+    assert any(item["candidate_id"] == body["candidate_id"] for item in listed)
+    audit = session.scalar(select(AuditEvent).where(AuditEvent.action == "sourced_candidate_created"))
+    assert audit.detail["human_action"] == "create_new"
+    assert "@" not in json.dumps(audit.detail)
+
+
+def test_a_lead_matching_an_existing_profile_is_never_created_or_merged_silently(session):
+    existing = _run(session, "ada.pdf", make_pdf(ADA))
+    provision(session)
+    session.commit()
+    before = session.scalar(select(func.count()).select_from(Candidate))
+    with TestClient(app) as client:
+        held = _lead(client, name="Ada Lovelace", email="ada@example.com")
+        assert held.status_code == 409
+        detail = held.json()["detail"]
+        assert detail["code"] == "possible_existing"
+        assert detail["matches"][0]["candidate_id"] == str(existing.candidate_id)
+        assert "same_email" in detail["matches"][0]["reasons"]
+        session.expire_all()
+        assert session.scalar(select(func.count()).select_from(Candidate)) == before
+        assert session.scalar(select(func.count()).select_from(CandidateSource)) == 0
+        # A profile the check did not find cannot receive the lead.
+        stray = _lead(client, name="Ada Lovelace", email="ada@example.com", attach_to="00000000-0000-0000-0000-000000000001")
+        assert stray.status_code == 409
+        # The recruiter chooses: add the source to the profile the check found.
+        attached = _lead(client, name="Ada Lovelace", email="ada@example.com", attach_to=str(existing.candidate_id))
+        assert attached.status_code == 201
+        assert attached.json()["candidate_id"] == str(existing.candidate_id)
+    session.expire_all()
+    assert session.scalar(select(func.count()).select_from(Candidate)) == before
+    assert session.get(Candidate, existing.candidate_id).merged_into_id is None
+
+
+def test_a_recruiter_can_confirm_a_new_profile_for_a_same_name_stranger(session):
+    existing = _run(session, "ada.pdf", make_pdf(ADA))
+    session.get(Candidate, existing.candidate_id).display_name = "Ada Lovelace"
+    provision(session)
+    session.commit()
+    before = session.scalar(select(func.count()).select_from(Candidate))
+    with TestClient(app) as client:
+        assert _lead(client, name="Ada Lovelace", email="another.ada@example.org").status_code == 409
+        confirmed = _lead(client, name="Ada Lovelace", email="another.ada@example.org", create_new="true")
+    assert confirmed.status_code == 201
+    session.expire_all()
+    assert session.scalar(select(func.count()).select_from(Candidate)) == before + 1
+
+
+def test_engineer_cannot_add_a_lead(session):
+    provision(session)
+    session.commit()
+    with TestClient(app) as client:
+        denied = client.post(
+            "/sourced-candidates",
+            headers=ENGINEER,
+            data={"name": "Lena Lead", "source_type": "linkedin", "source_reference": "x"},
+        )
+    assert denied.status_code == 403

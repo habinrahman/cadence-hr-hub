@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,17 +19,16 @@ from app.models import (
     DuplicateReview,
     ExtractionEvidence,
 )
+from app.domain.confidence import STATUS_FOR
 from app.domain.transitions import TransitionError
 from app.services.audit import write_audit
 from app.services.pii_access import PiiAccessError, allow_candidate_pii
 from app.services.profile_view import candidate_profile
 from app.services.ingest import ingest_bytes
-from app.services.mail import MailSender, get_mail_sender
 from app.services.merge import MergeError, merge_profiles, preview_merge
 from app.services.reviews import decide_duplicate_review
 from app.services.sourcing import record_source_decision
-from app.services.search import hybrid_search
-from app.services.sharing import SendError, approve_candidate, send_to_company
+from app.services.search import hybrid_search, list_candidates
 
 router = APIRouter()
 
@@ -81,7 +80,7 @@ def search_candidates(
             {
                 "candidate_id": str(hit.candidate_id) if hit.candidate_id else None,
                 "candidate_name": names.get(hit.candidate_id) if hit.candidate_id else None,
-                "document_id": str(hit.document_id),
+                "document_id": str(hit.document_id) if hit.document_id else None,
                 "chunk_id": str(hit.chunk_id) if hit.chunk_id else None,
                 "confirmed_profile": hit.confirmed_profile,
                 "retrieval_score": hit.retrieval_score,
@@ -93,10 +92,22 @@ def search_candidates(
     }
 
 
+@router.get("/candidates")
+def list_candidate_profiles(
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    auth: Auth = Depends(require_recruiter),
+    session: Session = Depends(get_session),
+) -> dict:
+    _pii(auth.role)
+    total, items = list_candidates(session, limit=limit, offset=offset)
+    return {"total": total, "limit": limit, "offset": offset, "candidates": items}
+
+
 @router.post("/documents", status_code=201)
 def upload_document(
     file: UploadFile,
-    auth: Auth = Depends(current_auth),
+    auth: Auth = Depends(require_recruiter),
     session: Session = Depends(get_session),
 ) -> dict:
     data = file.file.read(get_settings().max_upload_bytes + 1)
@@ -311,9 +322,18 @@ def decide_review(
     auth: Auth = Depends(require_recruiter),
     session: Session = Depends(get_session),
 ) -> dict:
-    review = session.get(DuplicateReview, review_id)
+    # Locked until commit: a double click waits, then sees the first decision instead of applying a second one
+    # (two "Create New Candidate" clicks must not create two profiles).
+    review = session.scalar(
+        select(DuplicateReview)
+        .where(DuplicateReview.id == review_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if review is None:
         raise HTTPException(status_code=404, detail="not_found")
+    if review.status == STATUS_FOR.get(body.action):
+        return _review_payload(session, review)  # the same decision again (a retry): already recorded
     try:
         decide_duplicate_review(
             session,
@@ -330,47 +350,6 @@ def decide_review(
         status = 403 if exc.code in {"human_required", "forbidden"} else 409
         raise HTTPException(status_code=status, detail=exc.code) from None
     return _review_payload(session, review)
-
-
-@router.post("/candidates/{candidate_id}/approvals", status_code=201)
-def approve(
-    candidate_id: UUID,
-    auth: Auth = Depends(require_recruiter),
-    session: Session = Depends(get_session),
-) -> dict:
-    try:
-        row = approve_candidate(session, candidate_id, auth.actor)
-        session.commit()
-    except TransitionError as exc:
-        session.rollback()
-        raise HTTPException(status_code=403, detail=exc.code) from None
-    except SendError as exc:
-        session.rollback()
-        raise HTTPException(status_code=404, detail=exc.code) from None
-    return {"id": str(row.id), "decision": row.decision}
-
-
-@router.post("/candidates/{candidate_id}/send", status_code=201)
-def send_candidate(
-    candidate_id: UUID,
-    auth: Auth = Depends(require_recruiter),
-    session: Session = Depends(get_session),
-    sender: MailSender = Depends(get_mail_sender),
-) -> dict:
-    try:
-        record = send_to_company(session, candidate_id, auth.actor, sender)
-        session.commit()
-    except TransitionError as exc:
-        session.rollback()
-        raise HTTPException(status_code=403, detail=exc.code) from None
-    except SendError as exc:
-        if exc.code == "mail_delivery_failed":
-            session.commit()
-            raise HTTPException(status_code=502, detail=exc.code) from None
-        session.rollback()
-        status = 404 if exc.code == "not_found" else 409
-        raise HTTPException(status_code=status, detail=exc.code) from None
-    return {"id": str(record.id), "destination": record.destination, "status": "sent"}
 
 
 def _merge_status(code: str) -> int:

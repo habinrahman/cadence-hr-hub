@@ -78,8 +78,7 @@ export function MergeDesk() {
   return (
     <>
       <PageHeader
-        hue="candidate"
-        title="Merge two profiles"
+title="Merge two profiles"
         sub="Preview both profiles, then confirm. The older profile is kept. Documents and applications stay on record."
       />
 

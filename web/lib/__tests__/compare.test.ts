@@ -44,13 +44,27 @@ const comparison = (fields: CompareField[], over: Partial<Comparison> = {}): Com
 
 describe("describeSignal", () => {
   it("says what matched in plain words", () => {
-    expect(describeSignal(signal({ code: "email", state: "matched" }))).toEqual({ text: "Same email address", kind: "match" });
-    expect(describeSignal(signal({ code: "phone", state: "unmatched" })).text).toBe("Different phone number");
+    expect(describeSignal(signal({ code: "email", state: "matched" }))).toEqual({ text: "Same email address — strong identity evidence", kind: "match" });
+    expect(describeSignal(signal({ code: "phone", state: "unmatched" }))).toEqual({
+      text: "Different phone number — evidence against the same person",
+      kind: "mismatch",
+    });
   });
   it("treats unknown as unknown, not as a mismatch", () => {
     const result = describeSignal(signal({ code: "phone", state: "unknown", value: null }));
     expect(result.kind).toBe("unknown");
     expect(result.text).toMatch(/not available/i);
+  });
+  it("words missing sections as not compared, never as a difference", () => {
+    for (const code of ["employment", "education", "skills", "semantic", "cv_dates", "explicit_version"]) {
+      const result = describeSignal(signal({ code, state: "unknown", value: null }));
+      expect(result.kind).toBe("unknown");
+      expect(result.text).toMatch(/not (compared|available)/i);
+    }
+  });
+  it("treats dates as update evidence, not as evidence against the same person", () => {
+    expect(describeSignal(signal({ code: "cv_dates", state: "unmatched" })).kind).toBe("info");
+    expect(describeSignal(signal({ code: "explicit_version", state: "unmatched" })).kind).toBe("info");
   });
   it("reports similarity as a percentage of overlap", () => {
     expect(describeSignal(signal({ code: "name", state: "recorded", value: 0.67 })).text).toBe("Name similarity 67%");
@@ -62,15 +76,15 @@ describe("describeSignal", () => {
   });
   it("does not repeat a phone match when the two CVs share no phone number", () => {
     const matched = signal({ code: "phone", state: "matched" });
-    expect(describeSignal(matched).text).toBe("Same phone number");
-    expect(describeSignal(matched, { sharedPhone: true }).text).toBe("Same phone number");
+    expect(describeSignal(matched).text).toBe("Same phone number — strong identity evidence");
+    expect(describeSignal(matched, { sharedPhone: true }).text).toBe("Same phone number — strong identity evidence");
     const doubtful = describeSignal(matched, { sharedPhone: false });
     expect(doubtful.kind).toBe("unknown");
     expect(doubtful.text).toMatch(/date-like digits/i);
     expect(doubtful.text).not.toMatch(/^Same phone/);
   });
   it("only second-guesses the phone signal, never the email signal", () => {
-    expect(describeSignal(signal({ code: "email", state: "matched" }), { sharedPhone: false }).text).toBe("Same email address");
+    expect(describeSignal(signal({ code: "email", state: "matched" }), { sharedPhone: false }).text).toBe("Same email address — strong identity evidence");
   });
   it("does not call the wording similarity a meaning model", () => {
     expect(describeSignal(signal({ code: "semantic", state: "recorded", value: 0.4 })).text).toMatch(/word overlap/i);
@@ -114,21 +128,35 @@ describe("summarize", () => {
 describe("item status labels", () => {
   it("never uses the word removed", () => {
     for (const meta of Object.values(ITEM_STATUS)) expect(meta.label.toLowerCase()).not.toContain("removed");
-    expect(ITEM_STATUS.only_existing.label).toBe("Not found in incoming CV");
+    expect(ITEM_STATUS.only_existing.label).toBe("Not found in new CV");
     expect(ITEM_STATUS.unknown.label).toBe("Not compared");
   });
 });
 
 describe("decisionCopy", () => {
-  it("describes what each backend action really does", () => {
-    expect(decisionCopy("accept_update").body).toMatch(/current CV/i);
+  it("uses the three action names and says what each one really does", () => {
+    expect(decisionCopy("accept_update").label).toBe("Merge & Update Profile");
+    expect(decisionCopy("accept_update").body).toMatch(/becomes their current CV/i);
     expect(decisionCopy("accept_update").body).toMatch(/stays in the candidate's history/i);
-    expect(decisionCopy("record_duplicate").body).toMatch(/not become the current/i);
-    expect(decisionCopy("create_separate_candidate").body).toMatch(/new candidate/i);
+    expect(decisionCopy("record_duplicate").label).toBe("Delete Duplicate");
+    expect(decisionCopy("create_separate_candidate").label).toBe("Create New Candidate");
+    expect(decisionCopy("create_separate_candidate").body).toMatch(/new candidate profile/i);
   });
-  it("never promises to delete anything", () => {
-    for (const action of ["accept_update", "record_duplicate", "create_separate_candidate"]) {
-      expect(decisionCopy(action).body.toLowerCase()).not.toMatch(/delete|remove|merge/);
+  it("Delete Duplicate is the danger action and says only the duplicate is archived", () => {
+    const copy = decisionCopy("record_duplicate");
+    expect(copy.tone).toBe("danger");
+    expect(copy.body).toMatch(/only this duplicate/i);
+    expect(copy.body).toMatch(/archived/i);
+    expect(copy.body).toMatch(/current CV are not changed/i);
+  });
+  it("an Excel row has no CV to delete, so it never says Delete Duplicate", () => {
+    const copy = decisionCopy("record_duplicate", false);
+    expect(copy.label).toBe("Record as duplicate");
+    expect(copy.body.toLowerCase()).not.toMatch(/delete|archiv/);
+  });
+  it("only Delete Duplicate mentions deleting", () => {
+    for (const action of ["accept_update", "create_separate_candidate"]) {
+      expect(decisionCopy(action).body.toLowerCase()).not.toMatch(/delete/);
     }
   });
 });
@@ -145,6 +173,23 @@ describe("recommendation", () => {
     const result = recommendation({ ...base, recommended_action: null, confidence: 60 });
     expect(result.action).toBeNull();
     expect(result.basis).toMatch(/below the high-confidence setting/i);
+    expect(result.headline).toBe("Possible relationship — review required");
+  });
+  it("says possible different person when the same person is unlikely", () => {
+    const result = recommendation({ ...base, likely_relationship: "different_candidate", recommended_action: null, confidence: 25 });
+    expect(result.headline).toBe("Possible different person");
+  });
+
+  it("calls a shared phone with a different email conflicting evidence, not a different person", () => {
+    const evidence = [
+      { code: "email", weight: 0.5, state: "unmatched", value: 0 },
+      { code: "phone", weight: 0.8, state: "matched", value: 1 },
+    ];
+    const result = recommendation({ ...base, likely_relationship: "updated_cv", recommended_action: null, confidence: 46, evidence });
+    expect(result.headline).toBe("Conflicting contact details — your decision");
+    expect(result.basis).toMatch(/same phone number, but a different email address/);
+    expect(result.action).toBeNull();
+    expect(result.action).toBeNull();
   });
   it("says so when more than one existing profile looks related", () => {
     expect(recommendation({ ...base, recommended_action: null, ambiguous: true }).headline).toMatch(/more than one/i);

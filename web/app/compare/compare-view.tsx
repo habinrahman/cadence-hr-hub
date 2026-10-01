@@ -128,13 +128,14 @@ export function CompareView() {
   const spreadsheet = comparison.reason === "excel_row";
   // Only judge the stored phone signal when the two CVs were actually read.
   const phoneField = comparison.available ? comparison.fields.find((f) => f.key === "phone") : undefined;
-  const signalContext = phoneField ? { sharedPhone: phoneField.items.some((item) => item.status === "same") } : undefined;
+  // A phone section that could not be compared says nothing either way, so the stored signal stands.
+  const signalContext = phoneField?.comparable ? { sharedPhone: phoneField.items.some((item) => item.status === "same") } : undefined;
 
   return (
     <>
       <p className="mb-2 flex flex-wrap gap-x-4 text-xs">
-        <Link href="/" prefetch={false}>
-          ← Inbox
+        <Link href="/queue" prefetch={false}>
+          ← Review queue
         </Link>
         {documentId ? (
           <Link href={`/intake?document=${documentId}`} prefetch={false}>
@@ -144,8 +145,8 @@ export function CompareView() {
       </p>
 
       <PageHeader
-        hue="rel"
-        title="CV relationship review"
+        eyebrow="CV comparison"
+        title="Previous CV vs new CV"
         sub="Cadence recommends. You decide. Compare the two CVs, check the evidence, then choose."
         actions={decided ? <Tag tone="decided">Decided</Tag> : <Tag tone="neutral">Awaiting your decision</Tag>}
       />
@@ -154,11 +155,24 @@ export function CompareView() {
         {stale ? (
           <Notice tone="warn">This review has already been decided. It has been refreshed, and nothing was changed by your click.</Notice>
         ) : null}
-        {notice ? <Notice>{notice}</Notice> : null}
+        {notice ? (
+          <Notice>
+            {notice}
+            {comparison.candidate?.id ? (
+              <>
+                {" "}
+                <Link href={`/candidates/${comparison.candidate.id}`} prefetch={false} className="font-semibold">
+                  Open {comparison.candidate.name ?? "the candidate"}&apos;s profile
+                </Link>
+              </>
+            ) : null}
+          </Notice>
+        ) : null}
         {actionError ? <ErrorState error={actionError} /> : null}
         {error ? <ErrorState error={error} onRetry={() => void refresh(candidateId)} /> : null}
         {comparison.warnings.map((code) =>
-          WARNING_MESSAGE[code] && !(stale && code === "review_decided") ? (
+          // Right after a decision the "already decided" warning only repeats the confirmation above it.
+          WARNING_MESSAGE[code] && !((stale || notice) && code === "review_decided") ? (
             <Notice key={code} tone="warn">
               {WARNING_MESSAGE[code]}
             </Notice>
@@ -168,7 +182,7 @@ export function CompareView() {
 
       {spreadsheet || !comparison.available ? (
         <div className="mt-4">
-          <p role="status" className="hatch rounded border border-rule-strong px-3 py-2.5">
+          <p role="status" className="hatch border border-rule-strong px-3 py-2.5">
             <span className="font-bold">Comparison unavailable. </span>
             {REASON_MESSAGE[comparison.reason ?? ""] ?? "The two CVs cannot be compared for this review."}
           </p>
@@ -182,37 +196,41 @@ export function CompareView() {
 
       {!spreadsheet ? (
         <>
-          <div className="mt-5">
-            <DocumentCards comparison={comparison} />
-          </div>
+          {/*
+            Reading order on a phone: the two CVs, then Cadence's recommendation and the decision, then the evidence.
+            On a wide screen the recommendation and decision sit in the right column from the top, so they stay in view.
+          */}
+          <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-x-8 gap-y-8 lg:grid-cols-[minmax(0,1fr)_23rem]">
+            <div className="min-w-0 space-y-4 lg:col-start-1 lg:row-start-1">
+              <DocumentCards comparison={comparison} />
 
-          {comparison.candidates.length > 1 ? (
-            <div className="mt-4">
-              <label htmlFor="which-candidate" className="mb-1 block text-[13px] font-semibold">
-                Compare with which existing candidate?
-              </label>
-              <select
-                id="which-candidate"
-                className="block min-h-11 w-full max-w-md rounded border border-rule-strong bg-panel px-2.5 sm:min-h-9"
-                value={candidateId ?? ""}
-                disabled={decided}
-                onChange={(event) => {
-                  setCandidateId(event.target.value);
-                  setLoaded(null);
-                  void refresh(event.target.value);
-                }}
-              >
-                {comparison.candidates.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name ?? "Unnamed candidate"}
-                  </option>
-                ))}
-              </select>
+              {comparison.candidates.length > 1 ? (
+                <div>
+                  <label htmlFor="which-candidate" className="mb-1 block text-[13px] font-semibold">
+                    Compare with which existing candidate?
+                  </label>
+                  <select
+                    id="which-candidate"
+                    className="block min-h-11 w-full max-w-md border border-rule-strong bg-panel px-2.5 sm:min-h-9"
+                    value={candidateId ?? ""}
+                    disabled={decided}
+                    onChange={(event) => {
+                      setCandidateId(event.target.value);
+                      setLoaded(null);
+                      void refresh(event.target.value);
+                    }}
+                  >
+                    {comparison.candidates.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name ?? "Unnamed candidate"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
             </div>
-          ) : null}
 
-          <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
-            <aside aria-label="Recommendation and decision" className="space-y-4 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start">
+            <aside aria-label="Recommendation and decision" className="space-y-4 lg:sticky lg:top-24 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:self-start">
               <Recommendation review={review} comparison={comparison} candidateId={candidateId} context={signalContext} />
               <DecisionPanel
                 review={review}
@@ -224,7 +242,7 @@ export function CompareView() {
                 record={
                   record.length > 0 ? (
                     <div>
-                      <h3 className="mb-1 text-xs font-bold uppercase tracking-wider text-mut">Record</h3>
+                      <h3 className="mb-1 font-mono text-[10.5px] font-medium uppercase tracking-[0.12em] text-mut">Record</h3>
                       <ul className="space-y-1">
                         {record.map((event) => (
                           <AuditLine key={`${event.created_at}-${event.action}`} action={event.action} actorKind={event.actor_kind} at={event.created_at} />
@@ -241,7 +259,7 @@ export function CompareView() {
               />
             </aside>
 
-            <div className="min-w-0 space-y-8 lg:col-start-1 lg:row-start-1">
+            <div className="min-w-0 space-y-8 lg:col-start-1 lg:row-start-2">
               <WhyRelated signals={review.evidence} candidateId={candidateId} confidence={review.confidence} context={signalContext} />
               {comparison.available ? (
                 <>

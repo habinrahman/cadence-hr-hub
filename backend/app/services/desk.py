@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.actor import Actor
@@ -15,11 +15,14 @@ from app.models import (
     HiringRequest,
     ProblemReport,
     RequestRequirement,
+    SharingRecord,
     Shortlist,
     ShortlistCandidate,
     User,
 )
+from app.services.hiring import pool_status
 from app.services.problems import list_reports
+from app.services.processing import processing_view
 
 _AWAITING = ("recommended", "needs_review")
 _INACTIVE_REQUESTS = ("closed", "cancelled")
@@ -41,6 +44,8 @@ def dashboard(session: Session, actor: Actor) -> dict:
     shares = [item for item in shortlisted if not _share_approved(session, item.id)]
     reports = [row for row in list_reports(session, actor) if row.status == "open"]
     requests = _active_requests(session)
+    received = _requests_received(session)
+    pools = _new_pools(session)
     return {
         "counts": {
             "relationship_reviews": len(reviews),
@@ -50,15 +55,37 @@ def dashboard(session: Session, actor: Actor) -> dict:
             "shares_awaiting_approval": len(shares),
             "open_problem_reports": len(reports),
             "active_hiring_requests": len(requests),
+            "requests_received": len(received),
+            "new_matches": len(pools),
+            "duplicate_reviews": len(reviews),
+            "reviews_needing_attention": len(reviews) + len(requirements) + len(matches) + len(shares),
         },
         "relationship_reviews": [_review_item(session, row) for row in reviews[:_LIMIT]],
-        "requirements_awaiting_approval": [_requirement_item(session, row) for row in requirements[:_LIMIT]],
-        "matches_awaiting_review": [_match_item(session, row) for row in matches[:_LIMIT]],
+        "requirements_awaiting_approval": [_requirement_item(row) for row in requirements[:_LIMIT]],
+        "matches_awaiting_review": [_match_item(row) for row in matches[:_LIMIT]],
         "shortlisted_candidates": [_shortlist_item(session, row) for row in shortlisted[:_LIMIT]],
         "shares_awaiting_approval": [_share_item(session, row) for row in shares[:_LIMIT]],
         "open_problem_reports": [_report_item(row) for row in reports[:_LIMIT]],
         "recent_activity": _activity(session),
         "active_hiring_requests": [_request_item(row) for row in requests[:_LIMIT]],
+        "new_match_pools": [_request_item(row) for row in pools[:_LIMIT]],
+        "needs_you_now": sorted(
+            [
+                *[
+                    _item(
+                        "new_matches",
+                        _request_label(row),
+                        "pool_ready",
+                        row.last_match_completed_at,
+                        f"/hiring?request={row.id}",
+                    )
+                    for row in pools
+                ],
+                *[_share_item(session, row) for row in shares],
+                *[_review_item(session, row) for row in reviews],
+            ],
+            key=lambda item: item["created_at"],
+        )[:_LIMIT],
         "viewer_id": str(user.id),
     }
 
@@ -67,8 +94,8 @@ def work_queue(session: Session, actor: Actor) -> dict:
     _recruiter(session, actor)
     items = [
         *[_review_item(session, row) for row in _pending_reviews(session)],
-        *[_requirement_item(session, row) for row in _proposed_requirements(session)],
-        *[_match_item(session, row) for row in _matches_awaiting(session)],
+        *[_requirement_item(row) for row in _proposed_requirements(session)],
+        *[_match_item(row) for row in _matches_awaiting(session)],
         *[
             _share_item(session, row)
             for row in _shortlisted(session)
@@ -98,43 +125,94 @@ def _pending_reviews(session: Session) -> list[DuplicateReview]:
     )
 
 
-def _proposed_requirements(session: Session) -> list[RequestRequirement]:
-    return list(
-        session.scalars(
-            select(RequestRequirement)
-            .where(RequestRequirement.review_status == "proposed")
-            .order_by(RequestRequirement.created_at.desc())
-        ).all()
+def _untouched_pool_clause():
+    """Spec: only reviews in a pool nobody has looked at yet need attention. Opening the pool
+    acknowledges it; a re-match after an edit (last_match_completed_at > pool_opened_at) makes
+    the pool untouched again. Closed/cancelled requests never nag."""
+    return or_(
+        HiringRequest.pool_opened_at.is_(None),
+        HiringRequest.last_match_completed_at > HiringRequest.pool_opened_at,
     )
 
 
-def _matches_awaiting(session: Session) -> list[CandidateMatch]:
-    shortlisted_match_ids = {
-        item
-        for item in session.scalars(
-            select(ShortlistCandidate.match_id).where(
-                ShortlistCandidate.review_state == "shortlisted",
-                ShortlistCandidate.match_id.is_not(None),
-            )
+def _proposed_requirements(session: Session) -> list[tuple[HiringRequest, int, object]]:
+    """One entry per request that still has requirements waiting for a decision: (request, how many, newest).
+
+    A pending approval stays on the list until HR decides it, whether or not anyone has opened the provisional pool."""
+    rows = session.execute(
+        select(HiringRequest, func.count(RequestRequirement.id), func.max(RequestRequirement.created_at))
+        .join(RequestRequirement, RequestRequirement.request_id == HiringRequest.id)
+        .where(
+            RequestRequirement.review_status == "proposed",
+            HiringRequest.status.not_in(_INACTIVE_REQUESTS),
         )
-        if item is not None
-    }
-    rows = session.scalars(
-        select(CandidateMatch)
-        .where(CandidateMatch.disposition.in_(_AWAITING))
-        .order_by(CandidateMatch.created_at.desc())
+        .group_by(HiringRequest.id)
+        .order_by(func.max(RequestRequirement.created_at).desc())
     ).all()
-    return [row for row in rows if row.id not in shortlisted_match_ids]
+    return [(request, int(count), newest) for request, count, newest in rows]
+
+
+def _matches_awaiting(session: Session) -> list[tuple[HiringRequest, int, object]]:
+    """One entry per CONFIRMED pool nobody has opened yet: (request, candidates awaiting a decision, matched at).
+
+    A provisional pool is not listed here: its next step is the requirement approval above. Shortlisted candidates and
+    candidates a recruiter rejected are decided already."""
+    shortlisted = select(ShortlistCandidate.match_id).where(
+        ShortlistCandidate.review_state == "shortlisted", ShortlistCandidate.match_id.is_not(None)
+    )
+    rows = session.execute(
+        select(HiringRequest, func.count(CandidateMatch.id))
+        .join(CandidateMatch, CandidateMatch.request_id == HiringRequest.id)
+        .where(
+            CandidateMatch.disposition.in_(_AWAITING),
+            CandidateMatch.id.not_in(shortlisted),
+            HiringRequest.status.not_in(_INACTIVE_REQUESTS),
+            _untouched_pool_clause(),
+        )
+        .group_by(HiringRequest.id)
+        .order_by(HiringRequest.last_match_completed_at.desc())
+    ).all()
+    return [
+        (request, int(count), request.last_match_completed_at)
+        for request, count in rows
+        if pool_status(session, request) == "confirmed"
+    ]
 
 
 def _shortlisted(session: Session) -> list[ShortlistCandidate]:
+    """Shortlisted candidates still waiting for a person: not yet sent to the company."""
+    sent = select(SharingRecord.id).where(
+        SharingRecord.shortlist_id == ShortlistCandidate.shortlist_id,
+        SharingRecord.candidate_id == ShortlistCandidate.candidate_id,
+        SharingRecord.status == "sent",
+    )
     return list(
         session.scalars(
             select(ShortlistCandidate)
-            .where(ShortlistCandidate.review_state == "shortlisted")
+            .join(Shortlist, Shortlist.id == ShortlistCandidate.shortlist_id)
+            .where(
+                ShortlistCandidate.review_state == "shortlisted",
+                Shortlist.status == "draft",
+                ~sent.exists(),
+            )
             .order_by(ShortlistCandidate.created_at.desc())
         ).all()
     )
+
+
+def _requests_received(session: Session) -> list[HiringRequest]:
+    rows = _active_requests(session)
+    return [row for row in rows if processing_view(session, row.id)["stage"] != "complete"]
+
+
+def _new_pools(session: Session) -> list[HiringRequest]:
+    out = []
+    for row in _active_requests(session):
+        if processing_view(session, row.id)["stage"] != "complete" or row.last_match_completed_at is None:
+            continue
+        if row.pool_opened_at is None or row.last_match_completed_at > row.pool_opened_at:
+            out.append(row)
+    return out
 
 
 def _active_requests(session: Session) -> list[HiringRequest]:
@@ -161,25 +239,26 @@ def _share_approved(session: Session, entry_id) -> bool:
 def _review_item(session: Session, row: DuplicateReview) -> dict:
     name = _name(session, row.candidate_id)
     href = f"/?document={row.document_id}" if row.document_id else "/data"
-    return _item("relationship_review", name, row.status, row.created_at, href)
+    item = _item("relationship_review", name, row.status, row.created_at, href)
+    # What Cadence recommends and how strongly, so a person can see the obvious ones without opening each.
+    item["relationship"] = row.likely_relationship
+    item["recommended_action"] = row.recommended_action
+    item["confidence"] = float(row.confidence) if row.confidence is not None else None
+    return item
 
 
-def _requirement_item(session: Session, row: RequestRequirement) -> dict:
-    request = session.get(HiringRequest, row.request_id)
-    subject = _request_label(request)
-    return _item("requirement_approval", subject, row.review_status, row.created_at, f"/hiring?request={row.request_id}")
+def _requirement_item(entry: tuple[HiringRequest, int, object]) -> dict:
+    request, count, newest = entry
+    item = _item("requirement_approval", _request_label(request), "proposed", newest, f"/hiring?request={request.id}")
+    item["count"] = count
+    return item
 
 
-def _match_item(session: Session, row: CandidateMatch) -> dict:
-    request = session.get(HiringRequest, row.request_id)
-    subject = f"{_name(session, row.candidate_id)} · {_request_label(request)}"
-    return _item(
-        "match_review",
-        subject,
-        row.disposition,
-        row.created_at,
-        f"/hiring?request={row.request_id}",
-    )
+def _match_item(entry: tuple[HiringRequest, int, object]) -> dict:
+    request, count, matched_at = entry
+    item = _item("match_review", _request_label(request), "pool_confirmed", matched_at, f"/hiring?request={request.id}")
+    item["count"] = count
+    return item
 
 
 def _shortlist_item(session: Session, row: ShortlistCandidate) -> dict:
@@ -211,15 +290,14 @@ def _request_item(row: HiringRequest) -> dict:
 
 
 def _activity(session: Session) -> list[dict]:
-    rows = session.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(12)).all()
-    return [
-        {
-            "action": row.action,
-            "actor_kind": row.actor_kind,
-            "created_at": row.created_at.isoformat(),
-        }
-        for row in rows
-    ]
+    """The latest events with who and on what, in the same shape as the audit trail page."""
+    from app.services.audit_view import describe_events
+
+    rows = session.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(12)).all()
+    events = describe_events(session, list(rows))
+    for event in events:
+        event["actor_kind"] = event["actor"]["kind"]  # kept for older clients
+    return events
 
 
 def _item(kind: str, subject: str, status: str, created, href: str) -> dict:

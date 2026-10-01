@@ -50,6 +50,17 @@ def _document(name: str, *, current: bool, candidate_id=None, supersedes=None) -
     )
 
 
+def test_fresh_dashboard_has_no_new_matches(session):
+    provision(session)
+    session.commit()
+    with TestClient(app) as client:
+        view = client.get("/dashboard", headers=RECRUITER)
+    assert view.status_code == 200
+    body = view.json()
+    assert body["counts"]["new_matches"] == 0
+    assert body["needs_you_now"] == []
+
+
 def test_dashboard_counts_come_from_stored_rows(session):
     provision(session)
     recruiter = session.scalar(select(User).where(User.role == "recruiter"))
@@ -194,7 +205,13 @@ def test_dashboard_counts_come_from_stored_rows(session):
         "shares_awaiting_approval": 1,
         "open_problem_reports": 1,
         "active_hiring_requests": 1,
+        "requests_received": 0,
+        "new_matches": 0,
+        "duplicate_reviews": 1,
+        "reviews_needing_attention": 3,
     }
+    review_item = recruiter_view.json()["relationship_reviews"][0]
+    assert {"relationship", "recommended_action", "confidence"} <= set(review_item)
     assert CONTACT not in recruiter_view.text
     assert "Closed Co" not in recruiter_view.text
     assert "Northwind" in recruiter_view.text
@@ -212,6 +229,82 @@ def test_dashboard_counts_come_from_stored_rows(session):
     assert session.get(DuplicateReview, pending.id).status == "pending"
 
 
+def test_pending_requirement_approval_keeps_counting_until_hr_decides_it(session):
+    provision(session)
+    ada = Candidate(source="upload", display_name="Ada Lovelace")
+    session.add(ada)
+    session.flush()
+    opened = HiringRequest(
+        company_name="Northwind",
+        job_title="Analyst",
+        description="Need an analyst.",
+        status="open",
+        received_at=datetime(2026, 3, 1, tzinfo=UTC),
+        pool_opened_at=datetime(2026, 3, 2, tzinfo=UTC),
+        last_match_completed_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    closed = HiringRequest(
+        company_name="Closed Co",
+        job_title="Archived role",
+        description="Finished.",
+        status="closed",
+        received_at=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    session.add_all([opened, closed])
+    session.flush()
+    python = RequestRequirement(
+        request_id=opened.id, position=1, label="skill", requirement_text="Python",
+        strength="mandatory", review_status="proposed",
+    )
+    session.add(python)
+    session.add(
+        RequestRequirement(
+            request_id=opened.id, position=2, label="skill", requirement_text="SQL",
+            strength="preferred", review_status="proposed",
+        )
+    )
+    session.add(
+        RequestRequirement(
+            request_id=closed.id, position=1, label="skill", requirement_text="SQL",
+            strength="mandatory", review_status="proposed",
+        )
+    )
+    session.add(CandidateMatch(request_id=opened.id, candidate_id=ada.id, disposition="needs_review"))
+    session.add(CandidateMatch(request_id=closed.id, candidate_id=ada.id, disposition="recommended"))
+    session.commit()
+    with TestClient(app) as client:
+        body = client.get("/dashboard", headers=RECRUITER).json()
+        queue = client.get("/work-queue", headers=RECRUITER).json()
+    # Opening the provisional pool does not decide the requirements. One approval is waiting, however many requirements
+    # it covers; the provisional pool is not a separate item; a closed request never nags.
+    assert body["counts"]["requirements_awaiting_approval"] == 1
+    assert body["requirements_awaiting_approval"][0]["count"] == 2
+    assert body["counts"]["matches_awaiting_review"] == 0
+    assert body["counts"]["reviews_needing_attention"] == 1
+    assert [item["type"] for item in queue["items"]] == ["requirement_approval"]
+
+    # HR approves both and the approved-only rematch finishes after the pool was opened: the confirmed pool counts again.
+    for row in session.scalars(select(RequestRequirement).where(RequestRequirement.request_id == opened.id)):
+        row.review_status = "approved"
+    opened.last_match_completed_at = datetime(2026, 3, 3, tzinfo=UTC)
+    session.commit()
+    with TestClient(app) as client:
+        body = client.get("/dashboard", headers=RECRUITER).json()
+        queue = client.get("/work-queue", headers=RECRUITER).json()
+    assert body["counts"]["requirements_awaiting_approval"] == 0
+    assert body["counts"]["matches_awaiting_review"] == 1
+    assert body["matches_awaiting_review"][0]["count"] == 1
+    assert body["counts"]["reviews_needing_attention"] == 1
+    assert {item["type"] for item in queue["items"]} == {"match_review"}
+
+    # Looking at the confirmed pool acknowledges it.
+    opened.pool_opened_at = datetime(2026, 3, 4, tzinfo=UTC)
+    session.commit()
+    with TestClient(app) as client:
+        body = client.get("/dashboard", headers=RECRUITER).json()
+    assert body["counts"]["reviews_needing_attention"] == 0
+
+
 def test_match_waiting_for_review_is_queued_until_shortlist(session):
     provision(session)
     ada = Candidate(source="upload", display_name="Ada Lovelace")
@@ -223,9 +316,16 @@ def test_match_waiting_for_review_is_queued_until_shortlist(session):
         description="Need an analyst.",
         status="open",
         received_at=datetime(2026, 3, 1, tzinfo=UTC),
+        last_match_completed_at=datetime(2026, 3, 2, tzinfo=UTC),
     )
     session.add(request)
     session.flush()
+    session.add(
+        RequestRequirement(
+            request_id=request.id, position=1, label="skill", requirement_text="Python",
+            strength="mandatory", review_status="approved",
+        )
+    )
     match = CandidateMatch(request_id=request.id, candidate_id=ada.id, disposition="needs_review")
     session.add(match)
     session.commit()

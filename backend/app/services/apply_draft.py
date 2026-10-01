@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.actor import SYSTEM
@@ -35,6 +37,21 @@ class ApplyResult:
     evidence_ids: list[UUID] = field(default_factory=list)
 
 
+_PAGE_FOOTER = re.compile(r"\bpage\s*\d+(\s*(of|/)\s*\d+)?\b", re.IGNORECASE)
+_DATE_WORDS = re.compile(r"\b(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sep(t(ember)?)?|oct(ober)?|nov(ember)?|dec(ember)?)\b\.?|\bpresent\b|\bto\b", re.IGNORECASE)
+
+
+def skill_name_is_noise(name: str) -> bool:
+    """Page footers, dates and date ranges, and sentences or lists run together are not skills."""
+    text = name.strip()
+    if len(text) < 2 or len(text) > 60 or len(text.split()) > 6:
+        return True
+    if "•" in text or " | " in text or _PAGE_FOOTER.search(text):
+        return True
+    # What is left after removing month names, "present" and "to" has no letters: it was a date or a date range.
+    return re.search(r"[^\W\d_]", _DATE_WORDS.sub("", text)) is None
+
+
 def apply_draft(
     session: Session,
     *,
@@ -59,8 +76,16 @@ def apply_draft(
     for item in draft.education:
         _apply_education(session, result, candidate, document_id, pages, chunks, agent_run_id, item)
     for item in draft.skills:
-        if _rejected_quote(pages, item.quote, item.page):
+        if _rejected_quote(pages, item.quote, item.page) or skill_name_is_noise(item.name):
             result.rejected += 1
+            continue
+        if session.scalar(
+            select(CandidateSkill.id).where(
+                CandidateSkill.candidate_id == candidate.id, CandidateSkill.normalized_name == item.name.casefold()
+            ).limit(1)
+        ):
+            # An earlier CV of the same person already established this fact; it keeps its own evidence.
+            result.accepted += 1
             continue
         row = CandidateSkill(
             candidate_id=candidate.id,
@@ -79,6 +104,15 @@ def apply_draft(
     for item in draft.certificates:
         if _rejected_quote(pages, item.quote, item.page):
             result.rejected += 1
+            continue
+        if session.scalar(
+            select(CandidateCertificate.id).where(
+                CandidateCertificate.candidate_id == candidate.id,
+                func.lower(CandidateCertificate.name) == item.name.casefold(),
+                CandidateCertificate.kind == item.kind,
+            ).limit(1)
+        ):
+            result.accepted += 1
             continue
         row = CandidateCertificate(
             candidate_id=candidate.id,
@@ -129,6 +163,15 @@ def _apply_experience(session, result, candidate, document_id, pages, chunks, ag
     if _rejected_quote(pages, item.employer_quote, item.page):
         result.rejected += 1
         return
+    if session.scalar(
+        select(CandidateExperience.id).where(
+            CandidateExperience.candidate_id == candidate.id,
+            func.lower(CandidateExperience.employer) == item.employer.casefold(),
+            CandidateExperience.start_date == (parse_iso_date(item.start_date) if item.start_date else None),
+        ).limit(1)
+    ):
+        result.accepted += 1
+        return
     row = CandidateExperience(
         candidate_id=candidate.id,
         source_document_id=document_id,
@@ -148,6 +191,18 @@ def _apply_experience(session, result, candidate, document_id, pages, chunks, ag
         raw = getattr(item, date_field)
         quote = getattr(item, f"{date_field}_quote")
         if raw is None:
+            continue
+        if date_field == "end_date" and raw == "present":
+            # "Present" is recorded as written. It is not stored as a date; years use the day the CV was received.
+            if quote is None or _rejected_quote(pages, quote, item.page):
+                result.rejected += 1
+                continue
+            result.accepted += 1
+            _evidence(
+                session, result, document_id, candidate.id, chunks, agent_run_id,
+                entity_type="experience", entity_id=row.id, field_name="end_date",
+                value="present", quote=quote, page=item.page,
+            )
             continue
         if quote is None or _rejected_quote(pages, quote, item.page) or parse_iso_date(raw) is None:
             result.rejected += 1
@@ -182,6 +237,15 @@ def _apply_education(session, result, candidate, document_id, pages, chunks, age
     if _rejected_quote(pages, item.institution_quote, item.page):
         result.rejected += 1
         return
+    if session.scalar(
+        select(CandidateEducation.id).where(
+            CandidateEducation.candidate_id == candidate.id,
+            func.lower(CandidateEducation.institution) == item.institution.casefold(),
+            CandidateEducation.credential.is_not_distinct_from(item.credential),
+        ).limit(1)
+    ):
+        result.accepted += 1
+        return
     row = CandidateEducation(
         candidate_id=candidate.id,
         source_document_id=document_id,
@@ -210,10 +274,14 @@ def _assign_years(session, result, candidate, document_id, chunks, agent_run_id)
     ranges = []
     evidence_quote = None
     evidence_page = None
+    received = _received_on(session, document_id)
     for row in rows:
-        if row.start_date is None or row.end_date is None:
+        end = row.end_date
+        if end is None and received is not None and _ends_present(session, row.id):
+            end = received
+        if row.start_date is None or end is None:
             continue
-        ranges.append((row.start_date, row.end_date))
+        ranges.append((row.start_date, end))
         if evidence_quote is None:
             quote_row = _date_quote(session, document_id, row.id)
             if quote_row is not None:
@@ -239,6 +307,25 @@ def _assign_years(session, result, candidate, document_id, chunks, agent_run_id)
         entity_type="candidate", entity_id=candidate.id, field_name="years_of_experience",
         value=f"{years}", quote=evidence_quote, page=evidence_page,
     )
+
+
+def _received_on(session, document_id):
+    from app.models import CandidateDocument
+
+    document = session.get(CandidateDocument, document_id)
+    return document.received_at.date() if document is not None and document.received_at else None
+
+
+def _ends_present(session, experience_id) -> bool:
+    from sqlalchemy import select
+
+    return session.scalar(
+        select(ExtractionEvidence.id).where(
+            ExtractionEvidence.entity_id == experience_id,
+            ExtractionEvidence.field_name == "end_date",
+            ExtractionEvidence.extracted_value == "present",
+        ).limit(1)
+    ) is not None
 
 
 def select_experiences(session, candidate_id):

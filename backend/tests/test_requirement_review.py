@@ -8,7 +8,7 @@ from app.domain.requirement_schema import ProposalRejected, validate_proposal
 from app.domain.requirements import parse_job_requirements
 from app.extraction.requirement_provider import BedrockRequirementReader, DeterministicRequirementReader
 from app.models import AgentRun, MatchRequirementResult, RequestRequirement
-from app.services.hiring import HiringError, approve_requirements, create_request, extract_requirements, open_request, update_requirement
+from app.services.hiring import HiringError, create_request, extract_requirements, open_request, update_requirement
 from app.services.matching import run_match
 from tests.test_corpus_gates import _actor
 from tests.test_intelligence import _run, make_pdf
@@ -56,7 +56,7 @@ def test_prompt_injection_and_protected_characteristics_are_not_requirements():
     assert extra.value.code == "malformed_output"
 
 
-def test_unsupported_proposal_is_dropped_and_matching_uses_only_approved_rows(session):
+def test_unsupported_proposal_is_dropped_and_matching_uses_the_stored_rows(session):
     document = _run(
         session,
         "ada.pdf",
@@ -103,13 +103,10 @@ def test_unsupported_proposal_is_dropped_and_matching_uses_only_approved_rows(se
     assert edited.review_status == "proposed"
     update_requirement(session, request.id, aws.id, actor, strength="preferred")
 
-    open_request(session, request.id, actor)
-    with pytest.raises(HiringError) as blocked:
-        run_match(session, request.id, actor)
-    assert blocked.value.code == "requirements_not_approved"
+    from app.services.hiring import approve_requirements
 
-    python = next(row for row in stored if row.requirement_text == "Python")
-    approve_requirements(session, request.id, actor, requirement_ids=[python.id])
+    approve_requirements(session, request.id, actor)
+    open_request(session, request.id, actor)
     matches = run_match(session, request.id, actor)
     assert len(matches) == 1
     assert matches[0].candidate_id == document.candidate_id
@@ -119,8 +116,8 @@ def test_unsupported_proposal_is_dropped_and_matching_uses_only_approved_rows(se
         .join(MatchRequirementResult, MatchRequirementResult.requirement_id == RequestRequirement.id)
         .where(MatchRequirementResult.match_id == matches[0].id)
     ).all()
-    assert {text.casefold() for text, _result in verdicts} == {"python"}
-    assert verdicts[0][1] == "meets"
+    assert {text.casefold() for text, _result in verdicts} == {row.requirement_text.casefold() for row in stored}
+    assert ("python", "meets") in {(text.casefold(), result) for text, result in verdicts}
 
 
 def test_deterministic_reader_reads_the_example_sentence():

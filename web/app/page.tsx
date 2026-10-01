@@ -1,6 +1,5 @@
-import { Suspense } from "react";
 import { redirect } from "next/navigation";
-import { Inbox } from "./inbox/inbox";
+import { CommandCenter } from "./command/command-center";
 
 export default async function Page({
   searchParams,
@@ -8,13 +7,13 @@ export default async function Page({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams;
-  // The backend links to /?document=<id>; that screen now lives at /intake.
+  // The backend links to /?document=<id>; that screen lives at /intake.
   if (typeof params.document === "string") {
     redirect(`/intake?document=${encodeURIComponent(params.document)}`);
   }
-  return (
-    <Suspense fallback={null}>
-      <Inbox />
-    </Suspense>
-  );
+  // The old inbox filter moved to the review queue.
+  if (typeof params.type === "string") {
+    redirect(`/queue?type=${encodeURIComponent(params.type)}`);
+  }
+  return <CommandCenter />;
 }

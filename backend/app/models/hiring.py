@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -20,6 +20,12 @@ class HiringRequest(IdMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    pool_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_match_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pool_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    requested_count: Mapped[int | None] = mapped_column(Integer)
+    # The company contact the shortlist is sent to. Nothing is sent until it is set.
+    contact_email: Mapped[str | None] = mapped_column(String(320))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

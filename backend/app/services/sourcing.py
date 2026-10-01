@@ -8,11 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.actor import Actor
-from app.domain.transitions import TransitionError
+from app.domain.transitions import TransitionError, utcnow
 from app.extraction.contacts import normalize_email, normalize_phone
 from app.extraction.media import UnsupportedFile
-from app.models import Candidate, CandidateContact, CandidateDocument, CandidateSource, User
+from app.models import Application, Candidate, CandidateContact, CandidateDocument, CandidateSource, User
 from app.services.audit import write_audit
+from app.services.compare import contact_pairs
 from app.services.ingest import ingest_bytes
 
 SOURCE_TYPES = frozenset({"linkedin", "referral", "other"})
@@ -79,6 +80,113 @@ def submit_source(
         },
     )
     return row
+
+
+class PossibleExisting(SourceError):
+    """The lead may already be on file. Nothing was written: a recruiter chooses the profile or a new one."""
+
+    def __init__(self, matches: list[dict]) -> None:
+        super().__init__("possible_existing")
+        self.matches = matches
+
+
+def submit_lead(
+    session: Session,
+    *,
+    actor: Actor,
+    display_name: str,
+    email: str,
+    phone: str,
+    source_type: str,
+    source_reference: str,
+    notes: str,
+    attach_to: UUID | None = None,
+    create_new: bool = False,
+) -> CandidateSource:
+    """A person found on LinkedIn or by referral, recorded before any CV exists.
+
+    The same email, phone or name checks a CV gets run first. If anyone matches, nothing is written and the
+    recruiter is shown who matched and why; they then add the source to that profile (attach_to) or confirm a new
+    profile (create_new). The system never picks between them."""
+    user = _recruiter(session, actor)
+    name = _name(display_name)
+    kind = _kind(source_type)
+    reference = _reference(source_reference)
+    stored_email = _email(email)
+    stored_phone = _phone(phone)
+    stored_notes = _notes(notes)
+    matches = _existing_matches(session, stored_email, stored_phone, name)
+    if attach_to is not None:
+        if str(attach_to) not in {item["candidate_id"] for item in matches}:
+            raise SourceError("not_a_match")  # only a profile the check found can receive this lead
+        candidate = session.get(Candidate, attach_to)
+        outcome = "attached_existing"
+    elif matches and not create_new:
+        raise PossibleExisting(matches)
+    else:
+        candidate = Candidate(source=kind, display_name=name)
+        session.add(candidate)
+        session.flush()
+        outcome = "new"
+    row = CandidateSource(
+        document_id=None,
+        candidate_id=candidate.id,
+        created_by_user_id=user.id,
+        display_name=name,
+        email=stored_email,
+        phone=stored_phone,
+        source_type=kind,
+        source_reference=reference,
+        notes=stored_notes,
+    )
+    session.add(row)
+    session.add(Application(candidate_id=candidate.id, document_id=None, source=kind, received_at=utcnow()))
+    _store_declared_contacts(session, row, candidate.id)
+    session.flush()
+    write_audit(
+        session,
+        actor=actor,
+        action="sourced_candidate_created" if outcome == "new" else "sourced_candidate_attached",
+        entity_type="candidate",
+        entity_id=candidate.id,
+        detail={
+            "candidate_id": str(candidate.id),
+            "source_type": kind,
+            "identity_outcome": outcome,
+            "human_action": "create_new" if outcome == "new" else "attach_to_existing",
+            "count": len(matches),
+        },
+    )
+    return row
+
+
+def _existing_matches(session: Session, email: str | None, phone: str | None, name: str) -> list[dict]:
+    """Profiles sharing the email, the phone or the full name, with the reasons. Merged-away profiles are skipped."""
+    pairs = contact_pairs(
+        session,
+        emails=[(email, email)] if email else [],
+        phones=[(phone, phone)] if phone else [],
+        name=name,
+    )
+    found: list[dict] = []
+    for pair in pairs:
+        candidate = session.get(Candidate, pair.candidate_id)
+        if candidate is None or candidate.merged_into_id is not None:
+            continue
+        reasons = [
+            reason
+            for reason, present in (
+                ("same_email", pair.email_match is True),
+                ("same_phone", pair.phone_match is True),
+                ("same_name", (pair.name_similarity or 0) >= 0.99),
+                ("similar_name", 0 < (pair.name_similarity or 0) < 0.99),
+                ("different_email", pair.email_match is False),
+                ("different_phone", pair.phone_match is False),
+            )
+            if present
+        ]
+        found.append({"candidate_id": str(candidate.id), "display_name": candidate.display_name, "reasons": reasons})
+    return found
 
 
 def declared_contacts(session: Session, document_id: UUID) -> tuple[list[tuple[str, str]], list[tuple[str, str]], str | None]:
